@@ -24,8 +24,10 @@ jobs:
         with:
           node-version: "lts/*"
       - name: Generate a CycloneDX SBOM of the npm dependencies
+        # npm sbom needs the package present in node_modules, not just a
+        # lockfile; --ignore-scripts skips @playwright/mcp's browser download.
         run: |
-          npm install --package-lock-only
+          npm install --ignore-scripts
           npm sbom --sbom-format=cyclonedx > sbom.cdx.json
 
       - uses: ruby/setup-ruby@v1
