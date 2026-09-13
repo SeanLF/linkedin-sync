@@ -60,9 +60,11 @@ push it, then `linkedin-sync export && linkedin-sync drift` to confirm it landed
 
 ## Getting started
 
-Requirements: **macOS**, **Node 18+ (or Bun)**, and **Google Chrome signed into
-LinkedIn** in your everyday profile. Nothing else to install: it uses
-`@playwright/mcp` over `npx` and the `sqlite3` binary macOS already ships.
+Requirements: **macOS**, **a supported Node (22+) or Bun**, and **Google Chrome
+signed into LinkedIn** in your everyday profile. The 22 floor is not technical
+(any modern runtime works); it just refuses end-of-life Node. Nothing else to
+install: it uses `@playwright/mcp` over `npx` and the `sqlite3` binary macOS
+already ships.
 
 ```bash
 git clone <this repo> && cd linkedin-sync
