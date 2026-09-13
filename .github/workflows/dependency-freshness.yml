@@ -14,13 +14,15 @@ on:
 
 jobs:
   still-active:
-    runs-on: ubuntu-latest
+    # macOS, the tool's own platform: package.json declares os=darwin, so npm
+    # refuses to build the lockfile on Linux. This is a small weekly job.
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "lts/*"
       - name: Generate a CycloneDX SBOM of the npm dependencies
         run: |
           npm install --package-lock-only
