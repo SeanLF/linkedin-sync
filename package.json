@@ -1,0 +1,23 @@
+{
+  "name": "linkedin-sync",
+  "version": "0.1.0",
+  "description": "Keep your LinkedIn profile in sync with a source-of-truth file. Reads by LinkedIn's own API, writes through its edit UI, proves every write by re-reading. macOS + Chrome.",
+  "type": "module",
+  "bin": {
+    "linkedin-sync": "src/cli.mjs"
+  },
+  "scripts": {
+    "init": "node src/init.mjs",
+    "import": "node src/session-import.mjs",
+    "export": "node src/export.mjs",
+    "drift": "node src/drift.mjs"
+  },
+  "dependencies": {
+    "@playwright/mcp": "0.0.80"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "os": ["darwin"]
+}

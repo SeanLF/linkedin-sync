@@ -1,0 +1,8 @@
+node_modules/
+*.local.md
+mirror.json
+linkedin.md
+!linkedin.example.md
+connections.csv
+sbom.cdx.json
+package-lock.json

@@ -1,0 +1,41 @@
+name: dependency freshness
+
+# still_active flags dependencies whose maintainers have gone quiet, before an
+# abandoned package becomes a problem. It audits a CycloneDX SBOM, so npm emits
+# one and still_active reads it. Fails the run only on a critical (long-dead)
+# dependency; warnings land in the job summary.
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 9 * * 1" # Mondays, 09:00 UTC
+  workflow_dispatch:
+
+jobs:
+  still-active:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Generate a CycloneDX SBOM of the npm dependencies
+        run: |
+          npm install --package-lock-only
+          npm sbom --sbom-format=cyclonedx > sbom.cdx.json
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+      - run: gem install still_active
+
+      - name: Audit dependency maintenance
+        env:
+          GITHUB_OAUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          still_active --sbom=sbom.cdx.json \
+            --github-oauth-token="$GITHUB_OAUTH_TOKEN" \
+            --fail-if-critical \
+            --markdown | tee -a "$GITHUB_STEP_SUMMARY"
