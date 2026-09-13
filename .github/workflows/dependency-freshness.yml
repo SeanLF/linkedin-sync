@@ -18,9 +18,9 @@ jobs:
     # refuses to build the lockfile on Linux. This is a small weekly job.
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: "lts/*"
       - name: Generate a CycloneDX SBOM of the npm dependencies
