@@ -1,0 +1,22 @@
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    # macOS: package.json declares os=darwin, so npm refuses to install on Linux.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "lts/*"
+      # --ignore-scripts skips @playwright/mcp's browser download; nothing here opens one.
+      - run: npm install --ignore-scripts
+      - run: npm run lint
+      - name: Syntax check every source file
+        run: for f in src/*.mjs src/*.js; do node --check "$f"; done
+      - run: npm test
