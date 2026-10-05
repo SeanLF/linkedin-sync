@@ -151,6 +151,14 @@ if (addSkillsField) {
 			skipped = [];
 		for (const skill of want) {
 			await mcp.callTool("browser_navigate", { url: surface.url }, 60000);
+			// The position surface has no editor deep link (see SURFACES), so open
+			// the role from the experience list, as the field writer does.
+			if (surface.open)
+				await mcp.runFn(
+					surface.open,
+					{ match: field.write.company, shot, role: field.write.role ?? null },
+					60000,
+				);
 			const raw = await mcp.runFn(addSkill, { skill, dryRun }, 90000);
 			let r;
 			try {
