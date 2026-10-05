@@ -13,7 +13,7 @@
     "drift": "node src/drift.mjs",
     "lint": "biome ci --error-on-warnings .",
     "format": "biome check --write .",
-    "test": "node src/drift.mjs --self-test && node src/copy-blocks.mjs --self-test"
+    "test": "node src/drift.mjs --self-test && node src/copy-blocks.mjs --self-test && node src/inpage.check.mjs"
   },
   "dependencies": {
     "@playwright/mcp": "0.0.80"

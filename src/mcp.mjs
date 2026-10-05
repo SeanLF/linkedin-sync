@@ -7,6 +7,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
+import { readVanity } from "./inpage.mjs";
 
 // Pinned. @latest renamed a tool once and the export failed silently for
 // months, so bump deliberately and re-run to check the tool names.
@@ -236,6 +237,17 @@ export function startMcp({
 		return text;
 	}
 
+	/**
+	 * Run a function from inpage.mjs. Its source text is what travels, so it
+	 * must be self-contained; `args` travel as JSON data, never spliced into code.
+	 */
+	function runFn(fn, args = {}, timeoutMs = 60000) {
+		return runCode(
+			`async (page) => (${fn})(page, ${JSON.stringify(args)})`,
+			timeoutMs,
+		);
+	}
+
 	async function evaluate(fn) {
 		let text = extractEvalResult(
 			await callTool("browser_evaluate", { function: fn }),
@@ -282,19 +294,7 @@ export function startMcp({
 			{ url: "https://www.linkedin.com/feed/" },
 			60000,
 		);
-		const raw = await runCode(
-			`async (page) => {
-      const csrf = (await page.context().cookies('https://www.linkedin.com')).find(c => c.name === 'JSESSIONID')?.value?.replace(/"/g, '');
-      if (!csrf) return JSON.stringify({ error: 'no JSESSIONID' });
-      const body = await page.evaluate(async (csrf) => {
-        const r = await fetch('/voyager/api/me', { headers: { 'csrf-token': csrf, 'accept': 'application/vnd.linkedin.normalized+json+2.1', 'x-restli-protocol-version': '2.0.0' } });
-        return { status: r.status, text: (await r.text()).slice(0, 4000) };
-      }, csrf);
-      const m = body.text.match(/"publicIdentifier":"([^"]+)"/);
-      return JSON.stringify({ status: body.status, vanity: m ? m[1] : null });
-    }`,
-			40000,
-		);
+		const raw = await runFn(readVanity, {}, 40000);
 		const r = JSON.parse(raw);
 		if (!r.vanity)
 			throw new Error(
@@ -321,6 +321,7 @@ export function startMcp({
 		callTool,
 		init,
 		runCode,
+		runFn,
 		evaluate,
 		ensureLoggedIn,
 		getVanity,
