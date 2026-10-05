@@ -21,7 +21,7 @@
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { fieldsFromBlocks, normalize, datesLabel } from "./schema.mjs";
+import { fieldsFromBlocks, normalize, datesLabel, experienceByCompany } from "./schema.mjs";
 import { parseBlocks, countChars } from "./copy-blocks.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -114,7 +114,30 @@ function selfTest() {
     if (!ok) failed++;
     console.log(`${ok ? "ok  " : "FAIL"}  ${name.padEnd(22)} expected ${want}, got ${got}`);
   }
-  console.log(failed ? `\n${failed} self-test failure(s)` : "\nself-test: comparator produces every verdict");
+  // Position reads must pick exactly one role or refuse. Fixture shaped like the
+  // export: a grouped company (title = company, roles[]) and a single entry
+  // (subtitle = company) sharing a role title with it.
+  const xp = { sections: { Experience: [
+    { title: "Hivebrite", subtitle: "Permanent · 3 yrs", roles: [{ title: "Senior Software Engineer", description: "H-senior" }, { title: "Software Engineer", description: "H-swe" }] },
+    { title: "Senior Software Engineer", subtitle: "OmbuLabs.ai · Freelance", description: "O-senior" },
+  ] } };
+  const rx = (m) => new RegExp(m, "i");
+  const pick = (m, role) => { try { return experienceByCompany(xp, rx(m), role)?.description ?? "absent"; } catch { return "refused"; } };
+  const roleCases = [
+    ["role in grouped company", ["Hivebrite", "Senior Software Engineer"], "H-senior"],
+    ["role is exact, not substring", ["Hivebrite", "Software Engineer"], "H-swe"],
+    ["role in single entry", ["OmbuLabs", "Senior Software Engineer"], "O-senior"],
+    ["grouped company, no role", ["Hivebrite", undefined], "refused"],
+    ["title at two companies", ["Senior Software Engineer", undefined], "refused"],
+    ["role not at that company", ["OmbuLabs", "Software Engineer"], "absent"],
+  ];
+  for (const [name, [m, role], want] of roleCases) {
+    const got = pick(m, role);
+    const ok = got === want;
+    if (!ok) failed++;
+    console.log(`${ok ? "ok  " : "FAIL"}  ${name.padEnd(28)} expected ${want}, got ${got}`);
+  }
+  console.log(failed ? `\n${failed} self-test failure(s)` : "\nself-test: comparator produces every verdict and position reads pick one role or refuse");
   return failed ? EXIT.broken : EXIT.clean;
 }
 

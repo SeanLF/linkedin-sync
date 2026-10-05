@@ -15,18 +15,29 @@
 
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-/** Find an experience entry (or a sub-role of one) whose company or title matches. */
-function experienceByCompany(profile, rx) {
+/**
+ * Find an experience entry (or a sub-role of one) whose company or title matches.
+ *
+ * With `role`, match the company only (a grouped entry's company is its title,
+ * a single entry's is its subtitle) and then the role title exactly. Without
+ * it, "Hivebrite" hits every role under Hivebrite and "Senior Software
+ * Engineer" hits that title at every company, and either throws below.
+ */
+export function experienceByCompany(profile, rx, role) {
   const xp = profile?.sections?.Experience;
   if (!Array.isArray(xp)) throw new Error("sections.Experience missing or not a list");
   const hits = [];
   for (const e of xp) {
-    const roles = e.roles?.length ? e.roles : [e];
+    const grouped = e.roles?.length > 0;
+    const roles = grouped ? e.roles : [e];
     for (const r of roles) {
-      if (rx.test(e.subtitle ?? "") || rx.test(e.title ?? "") || rx.test(r.title ?? "")) hits.push(r);
+      if (role) {
+        const company = grouped ? e.title : e.subtitle;
+        if (rx.test(company ?? "") && (r.title ?? "").toLowerCase() === role.toLowerCase()) hits.push(r);
+      } else if (rx.test(e.subtitle ?? "") || rx.test(e.title ?? "") || rx.test(r.title ?? "")) hits.push(r);
     }
   }
-  if (hits.length > 1) throw new Error(`match ${rx} hits ${hits.length} experience entries; make the match= attribute more specific`);
+  if (hits.length > 1) throw new Error(`match ${rx}${role ? ` role="${role}"` : ""} hits ${hits.length} experience entries; make the match= attribute more specific${role ? "" : ', or add role="Exact role title"'}`);
   return hits[0];
 }
 
@@ -91,8 +102,9 @@ export function fieldFromBlock(id, attrs = {}) {
     const match = attrs.match;
     if (!match) throw new Error(`block "${id}" needs a match="Company name" attribute`);
     const rx = new RegExp(escapeRe(match), "i");
-    const f = { id, label: `Position (${match})`, limit: 2000, read: (p) => experienceByCompany(p, rx)?.description ?? undefined, write: { surface: "position", match: { subtitle: rx }, control: "description", multiline: true } };
-    if (attrs.skills) { f.skills = attrs.skills.split(/\s*[,;|]\s*/).filter(Boolean); f.readSkills = (p) => experienceByCompany(p, rx)?.skills ?? []; }
+    const role = attrs.role;
+    const f = { id, label: `Position (${role ? `${role} at ` : ""}${match})`, limit: 2000, read: (p) => experienceByCompany(p, rx, role)?.description ?? undefined, write: { surface: "position", match: { subtitle: rx }, company: match, role, control: "description", multiline: true } };
+    if (attrs.skills) { f.skills = attrs.skills.split(/\s*[,;|]\s*/).filter(Boolean); f.readSkills = (p) => experienceByCompany(p, rx, role)?.skills ?? []; }
     return f;
   }
   if (type === "project") {

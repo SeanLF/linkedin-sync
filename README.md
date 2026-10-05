@@ -100,7 +100,9 @@ it starts matching and you edit down from there:
     ```
 
 The tag says what a block is; a `match` or `title` attribute says which entry it
-maps to. This is the only per-user file. Everything else is machinery.
+maps to. Where a company holds several roles, add `role="Exact role title"` to
+pick one: `match="Acme Corp" role="Senior Engineer"`. Without it the tool
+refuses rather than guess which role to read or write. This is the only per-user file. Everything else is machinery.
 
 ## Honest limits
 

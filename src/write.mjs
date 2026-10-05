@@ -52,13 +52,22 @@ const SURFACES = {
     // This editor carries "Share with your network" (probe 2026-09-11: Off).
     // A save with it on tells every connection about an edit; refuse.
     notifySwitch: true,
-    open: (match, shot) => `
+    // With a role, the edit control's aria-label ("Edit <role> at <company>",
+    // seen 2026-10-05) is the only selector: rows of a grouped company nest, so
+    // the row fallback would see the company once for every role. The prefix
+    // match keeps "Software Engineer" from hitting "Senior Software Engineer".
+    open: (match, shot, role) => `
 async (page) => {
   page.setDefaultTimeout(8000);
   await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
   try {
+    const role = ${JSON.stringify(role ?? null)};
     // 1. the edit control names the role and company in its aria-label
-    let edit = page.locator('a[aria-label*="Edit" i][aria-label*=${JSON.stringify(match)} i], button[aria-label*="Edit" i][aria-label*=${JSON.stringify(match)} i]');
+    let edit = role
+      ? page.locator(['a', 'button'].map((t) => t + '[aria-label^=' + JSON.stringify('Edit ' + role + ' at ') + ' i][aria-label*=' + JSON.stringify(${JSON.stringify(match)}) + ' i]').join(', '))
+      : page.locator('a[aria-label*="Edit" i][aria-label*=${JSON.stringify(match)} i], button[aria-label*="Edit" i][aria-label*=${JSON.stringify(match)} i]');
+    if (role) await edit.first().waitFor({ state: 'attached', timeout: 15000 }).catch(() => {});
+    if (!(await edit.count()) && role) throw new Error('no edit control labelled "Edit ' + role + ' at ' + ${JSON.stringify(match)} + '"');
     if (!(await edit.count())) {
       // 2. the row that mentions the company, then its edit control
       const rows = page.locator('li').filter({ hasText: ${JSON.stringify(match)} });
@@ -532,9 +541,10 @@ try {
     if (dialogs === 0) {
       console.log("Deep link opened no editor; falling back to the list and its edit control.");
       await mcp.callTool("browser_navigate", { url: surface.fallbackUrl }, 60000);
-      const match = field.write.match?.subtitle?.source?.replace(/\\\\/g, "");
+      const match = field.write.company;
       if (!match) throw new Error(`${fieldId} has no match="Company" to find its position row`);
-      console.log(`Opening the editor for the row matching ${JSON.stringify(match)}: ${await mcp.runCode(surface.open(match, SHOT), 60000)}`);
+      const role = field.write.role;
+      console.log(`Opening the editor for ${role ? `"${role}" at ` : "the row matching "}${JSON.stringify(match)}: ${await mcp.runCode(surface.open(match, SHOT, role), 60000)}`);
     }
   }
 

@@ -57,19 +57,21 @@ if (m.sections?.About) { out.push(`\n## About\n`); out.push(fence("about", {}, m
 // One position block per company: its most recent role with a description
 // (the mirror is newest-first). A company appears once, so the `match`
 // attribute the writer uses is unambiguous and drift stays clean on day one.
-// Multiple sub-roles at the same company collapse to one block; edit or add
-// more by hand if you want to write to an older role.
+// A grouped company (several roles) names itself in its title, not its
+// subtitle ("Permanent · 3 yrs"), and needs role= to pick one of them; add
+// blocks for older roles by hand.
 const seenCompany = new Set();
 for (const e of (m.sections?.Experience || [])) {
-  const roles = e.roles?.length ? e.roles : [e];
+  const grouped = e.roles?.length > 0;
+  const roles = grouped ? e.roles : [e];
   for (const r of roles) {
     if (!r.description) continue;
-    const company = (e.subtitle || e.title || "").split("·")[0].trim();
+    const company = ((grouped ? e.title : e.subtitle) || e.title || "").split("·")[0].trim();
     const key = slug(company);
     if (!key || seenCompany.has(key)) continue;
     seenCompany.add(key);
     out.push(`\n## Position: ${r.title || company}\n`);
-    out.push(fence("position." + key, { match: company }, r.description));
+    out.push(fence("position." + key, grouped ? { match: company, role: r.title } : { match: company }, r.description));
   }
 }
 
