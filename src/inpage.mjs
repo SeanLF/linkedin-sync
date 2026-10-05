@@ -590,7 +590,7 @@ export const fillDialog = async (
 	const norm = (s) =>
 		s
 			.replace(/\r/g, "")
-			.replace(/ /g, " ")
+			.replace(/\u00a0/g, " ")
 			.replace(/[ \t]+$/gm, "")
 			.replace(/\n+/g, "\n")
 			.trim();

@@ -17,13 +17,24 @@ const source = readFileSync(new URL("./inpage.mjs", import.meta.url), "utf8");
 export function violations(src, fns) {
 	const found = [];
 	for (const line of src.split("\n"))
-		if (/^(const|let|var|function|class|async)\b/.test(line))
+		if (/^(import|const|let|var|function|class|async)\b/.test(line))
 			found.push(`top-level declaration that will not travel: ${line.trim()}`);
 	const names = Object.keys(fns);
 	for (const [name, fn] of Object.entries(fns)) {
 		const body = String(fn);
 		if (typeof fn !== "function" || !/^async \(\s*page\b/.test(body))
 			found.push(`${name} is not an async (page, args) function`);
+		// Defined in Node and in Biome's globals, absent in the MCP sandbox (it
+		// has no URL either, probe 2026-09-12). A browser-side page.evaluate
+		// callback could legitimately use URL; none does, so deny it outright.
+		// Uses, not words: a comment may say "require" or "process".
+		const nodeOnly = body.match(
+			/\b(?:new\s+(URL)\b|(URL|process|Buffer)\s*\.|(require)\s*\(|(__dirname|__filename)\b)/,
+		);
+		if (nodeOnly)
+			found.push(
+				`${name} uses ${nodeOnly.slice(1).find(Boolean)}, which the sandbox does not have`,
+			);
 		for (const other of names)
 			if (other !== name && new RegExp(`\\b${other}\\b`).test(body))
 				found.push(`${name} names ${other}, which does not travel with it`);
@@ -44,6 +55,8 @@ const fixtures = [
 	],
 	["a top-level constant", "const SEL = 'x';\n", { a: async (page) => page }],
 	["a non-function export", "", { a: "async (page) => page" }],
+	["an import", 'import { X } from "./y.mjs";\n', { a: async (page) => page }],
+	["a Node-only global", "", { a: async (page) => new URL(page) }],
 ];
 
 let failed = 0;
