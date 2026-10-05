@@ -19,20 +19,25 @@
 //   ./linkedin-drift.mjs --self-test        prove the comparator can fail
 
 import { readFileSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { fieldsFromBlocks, normalize, datesLabel, experienceByCompany } from "./schema.mjs";
-import { parseBlocks, countChars } from "./copy-blocks.mjs";
+import { countChars, parseBlocks } from "./copy-blocks.mjs";
+import {
+	datesLabel,
+	experienceByCompany,
+	fieldsFromBlocks,
+	normalize,
+} from "./schema.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MIRROR = join(__dirname, "mirror.json");
 
 export const VERDICTS = {
-  MATCH: "match",            // live and desired agree
-  DRIFT: "drift",            // both present, different text
-  ABSENT: "absent",          // desired exists; LinkedIn has no such field yet
-  NO_DESIRED: "no-desired",  // LinkedIn has a value; the record does not
-  UNREADABLE: "unreadable",  // the selector threw: the export shape changed
+	MATCH: "match", // live and desired agree
+	DRIFT: "drift", // both present, different text
+	ABSENT: "absent", // desired exists; LinkedIn has no such field yet
+	NO_DESIRED: "no-desired", // LinkedIn has a value; the record does not
+	UNREADABLE: "unreadable", // the selector threw: the export shape changed
 };
 
 // UNREADABLE means the tool is broken and every other verdict this run is
@@ -41,44 +46,56 @@ const EXIT = { clean: 0, stale: 1, broken: 2 };
 
 /** Compare one schema field. Never throws; shape errors become UNREADABLE. */
 export function compareField(field, profile, desired) {
-  let live;
-  try {
-    live = field.read(profile);
-  } catch (err) {
-    return { id: field.id, verdict: VERDICTS.UNREADABLE, detail: err.message };
-  }
+	let live;
+	try {
+		live = field.read(profile);
+	} catch (err) {
+		return { id: field.id, verdict: VERDICTS.UNREADABLE, detail: err.message };
+	}
 
-  const hasLive = typeof live === "string" && live.trim() !== "";
-  const hasDesired = typeof desired === "string" && desired.trim() !== "";
+	const hasLive = typeof live === "string" && live.trim() !== "";
+	const hasDesired = typeof desired === "string" && desired.trim() !== "";
 
-  if (!hasDesired && !hasLive) return { id: field.id, verdict: VERDICTS.MATCH, detail: "both empty" };
-  if (!hasDesired) return { id: field.id, verdict: VERDICTS.NO_DESIRED, live };
-  if (!hasLive) return { id: field.id, verdict: VERDICTS.ABSENT, desired };
+	if (!hasDesired && !hasLive)
+		return { id: field.id, verdict: VERDICTS.MATCH, detail: "both empty" };
+	if (!hasDesired) return { id: field.id, verdict: VERDICTS.NO_DESIRED, live };
+	if (!hasLive) return { id: field.id, verdict: VERDICTS.ABSENT, desired };
 
-  const a = normalize(live);
-  const b = normalize(desired);
-  if (a === b) return { id: field.id, verdict: VERDICTS.MATCH, detail: `${countChars(b)} chars` };
-  return { id: field.id, verdict: VERDICTS.DRIFT, live: a, desired: b, at: firstDifference(a, b) };
+	const a = normalize(live);
+	const b = normalize(desired);
+	if (a === b)
+		return {
+			id: field.id,
+			verdict: VERDICTS.MATCH,
+			detail: `${countChars(b)} chars`,
+		};
+	return {
+		id: field.id,
+		verdict: VERDICTS.DRIFT,
+		live: a,
+		desired: b,
+		at: firstDifference(a, b),
+	};
 }
 
 /** Index of the first differing character, for a readable report. */
 function firstDifference(a, b) {
-  const n = Math.min(a.length, b.length);
-  for (let i = 0; i < n; i++) if (a[i] !== b[i]) return i;
-  return n;
+	const n = Math.min(a.length, b.length);
+	for (let i = 0; i < n; i++) if (a[i] !== b[i]) return i;
+	return n;
 }
 
 function excerpt(s, at, span = 60) {
-  const start = Math.max(0, at - span);
-  const head = start > 0 ? "..." : "";
-  const tail = at + span < s.length ? "..." : "";
-  return (head + s.slice(start, at + span) + tail).replace(/\n/g, "\\n");
+	const start = Math.max(0, at - span);
+	const head = start > 0 ? "..." : "";
+	const tail = at + span < s.length ? "..." : "";
+	return (head + s.slice(start, at + span) + tail).replace(/\n/g, "\\n");
 }
 
 function mirrorAgeDays(profile) {
-  const t = Date.parse(profile?.exportedAt ?? "");
-  if (Number.isNaN(t)) return null;
-  return (Date.now() - t) / 86_400_000;
+	const t = Date.parse(profile?.exportedAt ?? "");
+	if (Number.isNaN(t)) return null;
+	return (Date.now() - t) / 86_400_000;
 }
 
 // --- self-test -------------------------------------------------------------
@@ -87,134 +104,232 @@ function mirrorAgeDays(profile) {
 // verdict, so the harness is proven able to fail before its pass means
 // anything.
 function selfTest() {
-  const cases = [
-    ["identical text",       { read: () => "abc" },                    "abc",  VERDICTS.MATCH],
-    ["nbsp and CRLF only",   { read: () => "a b\r\nc" },          "a b\nc", VERDICTS.MATCH],
-    ["real difference",      { read: () => "abc" },                    "abd",  VERDICTS.DRIFT],
-    ["case is real drift",   { read: () => "Abc" },                    "abc",  VERDICTS.DRIFT],
-    ["curly quote is drift", { read: () => "it’s" },              "it's", VERDICTS.DRIFT],
-    ["missing on LinkedIn",  { read: () => undefined },                "abc",  VERDICTS.ABSENT],
-    ["missing in record",    { read: () => "abc" },                    "",     VERDICTS.NO_DESIRED],
-    ["shape changed",        { read: () => { throw new Error("Projects missing"); } }, "abc", VERDICTS.UNREADABLE],
-  ];
+	const cases = [
+		["identical text", { read: () => "abc" }, "abc", VERDICTS.MATCH],
+		[
+			"nbsp and CRLF only",
+			{ read: () => "a b\r\nc" },
+			"a b\nc",
+			VERDICTS.MATCH,
+		],
+		["real difference", { read: () => "abc" }, "abd", VERDICTS.DRIFT],
+		["case is real drift", { read: () => "Abc" }, "abc", VERDICTS.DRIFT],
+		["curly quote is drift", { read: () => "it’s" }, "it's", VERDICTS.DRIFT],
+		["missing on LinkedIn", { read: () => undefined }, "abc", VERDICTS.ABSENT],
+		["missing in record", { read: () => "abc" }, "", VERDICTS.NO_DESIRED],
+		[
+			"shape changed",
+			{
+				read: () => {
+					throw new Error("Projects missing");
+				},
+			},
+			"abc",
+			VERDICTS.UNREADABLE,
+		],
+	];
 
-  let failed = 0;
-  // The age guard is the other half of the instrument: no exportedAt must
-  // read as unknown, never as fresh.
-  const ageCases = [["no exportedAt", {}, null], ["unparseable exportedAt", { exportedAt: "yesterday" }, null], ["fresh exportedAt", { exportedAt: new Date().toISOString() }, 0]];
-  for (const [name, profile, want] of ageCases) {
-    const got = mirrorAgeDays(profile);
-    const ok = want === null ? got === null : (typeof got === "number" && got < 1);
-    if (!ok) failed++;
-    console.log(`${ok ? "ok  " : "FAIL"}  ${name.padEnd(22)} expected ${want === null ? "unknown" : "fresh"}, got ${got === null ? "unknown" : got.toFixed(3) + " days"}`);
-  }
-  for (const [name, field, desired, want] of cases) {
-    const got = compareField({ id: name, ...field }, {}, desired).verdict;
-    const ok = got === want;
-    if (!ok) failed++;
-    console.log(`${ok ? "ok  " : "FAIL"}  ${name.padEnd(22)} expected ${want}, got ${got}`);
-  }
-  // Position reads must pick exactly one role or refuse. Fixture shaped like the
-  // export: a grouped company (title = company, roles[]) and a single entry
-  // (subtitle = company) sharing a role title with it.
-  const xp = { sections: { Experience: [
-    { title: "Hivebrite", subtitle: "Permanent · 3 yrs", roles: [{ title: "Senior Software Engineer", description: "H-senior" }, { title: "Software Engineer", description: "H-swe" }] },
-    { title: "Senior Software Engineer", subtitle: "OmbuLabs.ai · Freelance", description: "O-senior" },
-  ] } };
-  const rx = (m) => new RegExp(m, "i");
-  const pick = (m, role) => { try { return experienceByCompany(xp, rx(m), role)?.description ?? "absent"; } catch { return "refused"; } };
-  const roleCases = [
-    ["role in grouped company", ["Hivebrite", "Senior Software Engineer"], "H-senior"],
-    ["role is exact, not substring", ["Hivebrite", "Software Engineer"], "H-swe"],
-    ["role in single entry", ["OmbuLabs", "Senior Software Engineer"], "O-senior"],
-    ["grouped company, no role", ["Hivebrite", undefined], "refused"],
-    ["title at two companies", ["Senior Software Engineer", undefined], "refused"],
-    ["role not at that company", ["OmbuLabs", "Software Engineer"], "absent"],
-  ];
-  for (const [name, [m, role], want] of roleCases) {
-    const got = pick(m, role);
-    const ok = got === want;
-    if (!ok) failed++;
-    console.log(`${ok ? "ok  " : "FAIL"}  ${name.padEnd(28)} expected ${want}, got ${got}`);
-  }
-  console.log(failed ? `\n${failed} self-test failure(s)` : "\nself-test: comparator produces every verdict and position reads pick one role or refuse");
-  return failed ? EXIT.broken : EXIT.clean;
+	let failed = 0;
+	// The age guard is the other half of the instrument: no exportedAt must
+	// read as unknown, never as fresh.
+	const ageCases = [
+		["no exportedAt", {}, null],
+		["unparseable exportedAt", { exportedAt: "yesterday" }, null],
+		["fresh exportedAt", { exportedAt: new Date().toISOString() }, 0],
+	];
+	for (const [name, profile, want] of ageCases) {
+		const got = mirrorAgeDays(profile);
+		const ok =
+			want === null ? got === null : typeof got === "number" && got < 1;
+		if (!ok) failed++;
+		console.log(
+			`${ok ? "ok  " : "FAIL"}  ${name.padEnd(22)} expected ${want === null ? "unknown" : "fresh"}, got ${got === null ? "unknown" : `${got.toFixed(3)} days`}`,
+		);
+	}
+	for (const [name, field, desired, want] of cases) {
+		const got = compareField({ id: name, ...field }, {}, desired).verdict;
+		const ok = got === want;
+		if (!ok) failed++;
+		console.log(
+			`${ok ? "ok  " : "FAIL"}  ${name.padEnd(22)} expected ${want}, got ${got}`,
+		);
+	}
+	// Position reads must pick exactly one role or refuse. Fixture shaped like the
+	// export: a grouped company (title = company, roles[]) and a single entry
+	// (subtitle = company) sharing a role title with it.
+	const xp = {
+		sections: {
+			Experience: [
+				{
+					title: "Hivebrite",
+					subtitle: "Permanent · 3 yrs",
+					roles: [
+						{ title: "Senior Software Engineer", description: "H-senior" },
+						{ title: "Software Engineer", description: "H-swe" },
+					],
+				},
+				{
+					title: "Senior Software Engineer",
+					subtitle: "OmbuLabs.ai · Freelance",
+					description: "O-senior",
+				},
+			],
+		},
+	};
+	const rx = (m) => new RegExp(m, "i");
+	const pick = (m, role) => {
+		try {
+			return experienceByCompany(xp, rx(m), role)?.description ?? "absent";
+		} catch {
+			return "refused";
+		}
+	};
+	const roleCases = [
+		[
+			"role in grouped company",
+			["Hivebrite", "Senior Software Engineer"],
+			"H-senior",
+		],
+		[
+			"role is exact, not substring",
+			["Hivebrite", "Software Engineer"],
+			"H-swe",
+		],
+		[
+			"role in single entry",
+			["OmbuLabs", "Senior Software Engineer"],
+			"O-senior",
+		],
+		["grouped company, no role", ["Hivebrite", undefined], "refused"],
+		[
+			"title at two companies",
+			["Senior Software Engineer", undefined],
+			"refused",
+		],
+		["role not at that company", ["OmbuLabs", "Software Engineer"], "absent"],
+	];
+	for (const [name, [m, role], want] of roleCases) {
+		const got = pick(m, role);
+		const ok = got === want;
+		if (!ok) failed++;
+		console.log(
+			`${ok ? "ok  " : "FAIL"}  ${name.padEnd(28)} expected ${want}, got ${got}`,
+		);
+	}
+	console.log(
+		failed
+			? `\n${failed} self-test failure(s)`
+			: "\nself-test: comparator produces every verdict and position reads pick one role or refuse",
+	);
+	return failed ? EXIT.broken : EXIT.clean;
 }
 
 // --- main ------------------------------------------------------------------
 function main() {
-  const args = process.argv.slice(2);
-  if (args.includes("--self-test")) process.exit(selfTest());
+	const args = process.argv.slice(2);
+	if (args.includes("--self-test")) process.exit(selfTest());
 
-  const maxAgeIdx = args.indexOf("--max-age-days");
-  const maxAgeDays = maxAgeIdx === -1 ? 14 : Number(args[maxAgeIdx + 1]);
+	const maxAgeIdx = args.indexOf("--max-age-days");
+	const maxAgeDays = maxAgeIdx === -1 ? 14 : Number(args[maxAgeIdx + 1]);
 
-  let profile;
-  try {
-    profile = JSON.parse(readFileSync(MIRROR, "utf8"));
-  } catch (err) {
-    console.error(`Cannot read the mirror at ${MIRROR}: ${err.message}`);
-    console.error("Run: LINKEDIN_CDP=1 node src/export.mjs");
-    process.exit(EXIT.broken);
-  }
+	let profile;
+	try {
+		profile = JSON.parse(readFileSync(MIRROR, "utf8"));
+	} catch (err) {
+		console.error(`Cannot read the mirror at ${MIRROR}: ${err.message}`);
+		console.error("Run: LINKEDIN_CDP=1 node src/export.mjs");
+		process.exit(EXIT.broken);
+	}
 
-  const blocks = parseBlocks();
-  const { fields } = fieldsFromBlocks(blocks);
-  const age = mirrorAgeDays(profile);
+	const blocks = parseBlocks();
+	const { fields } = fieldsFromBlocks(blocks);
+	const age = mirrorAgeDays(profile);
 
-  console.log(`mirror   ${profile.exportedAt ?? "(no exportedAt)"}`);
-  if (age === null) {
-    console.log("         WARNING: no exportedAt; cannot tell how stale this is");
-  } else {
-    console.log(`         ${age.toFixed(1)} days old`);
-  }
-  console.log(`record   ${blocks.size} blocks\n`);
+	console.log(`mirror   ${profile.exportedAt ?? "(no exportedAt)"}`);
+	if (age === null) {
+		console.log(
+			"         WARNING: no exportedAt; cannot tell how stale this is",
+		);
+	} else {
+		console.log(`         ${age.toFixed(1)} days old`);
+	}
+	console.log(`record   ${blocks.size} blocks\n`);
 
-  // A project's dates are a second field behind the same title: LinkedIn
-  // sorts undated projects last, so a matching description on a project with
-  // no dates is still a stale profile.
-  const results = fields.flatMap((f) => [
-    compareField(f, profile, blocks.get(f.id).text),
-    ...(f.dates ? [compareField({ id: `${f.id}.dates`, read: f.readDates }, profile, datesLabel(f.dates))] : []),
-  ]);
+	// A project's dates are a second field behind the same title: LinkedIn
+	// sorts undated projects last, so a matching description on a project with
+	// no dates is still a stale profile.
+	const results = fields.flatMap((f) => [
+		compareField(f, profile, blocks.get(f.id).text),
+		...(f.dates
+			? [
+					compareField(
+						{ id: `${f.id}.dates`, read: f.readDates },
+						profile,
+						datesLabel(f.dates),
+					),
+				]
+			: []),
+	]);
 
-  const width = Math.max(...results.map((r) => r.id.length));
-  for (const r of results) {
-    const mark = { match: "ok  ", drift: "DRIFT", absent: "ABSENT", "no-desired": "no-rec", unreadable: "BROKEN" }[r.verdict];
-    console.log(`${mark.padEnd(7)} ${r.id.padEnd(width)}  ${r.detail ?? ""}`);
-    if (r.verdict === VERDICTS.DRIFT) {
-      console.log(`        live    ${excerpt(r.live, r.at)}`);
-      console.log(`        record  ${excerpt(r.desired, r.at)}`);
-    }
-    if (r.verdict === VERDICTS.ABSENT) {
-      console.log(`        not on LinkedIn yet (${countChars(r.desired)} chars in the record)`);
-    }
-    if (r.verdict === VERDICTS.UNREADABLE) {
-      console.log(`        the export no longer has the shape this selector expects`);
-    }
-  }
+	const width = Math.max(...results.map((r) => r.id.length));
+	for (const r of results) {
+		const mark = {
+			match: "ok  ",
+			drift: "DRIFT",
+			absent: "ABSENT",
+			"no-desired": "no-rec",
+			unreadable: "BROKEN",
+		}[r.verdict];
+		console.log(`${mark.padEnd(7)} ${r.id.padEnd(width)}  ${r.detail ?? ""}`);
+		if (r.verdict === VERDICTS.DRIFT) {
+			console.log(`        live    ${excerpt(r.live, r.at)}`);
+			console.log(`        record  ${excerpt(r.desired, r.at)}`);
+		}
+		if (r.verdict === VERDICTS.ABSENT) {
+			console.log(
+				`        not on LinkedIn yet (${countChars(r.desired)} chars in the record)`,
+			);
+		}
+		if (r.verdict === VERDICTS.UNREADABLE) {
+			console.log(
+				`        the export no longer has the shape this selector expects`,
+			);
+		}
+	}
 
-  const unread = results.filter((r) => r.verdict === VERDICTS.UNREADABLE).length;
-  const stale = results.filter((r) => r.verdict === VERDICTS.DRIFT || r.verdict === VERDICTS.ABSENT).length;
-  const norec = results.filter((r) => r.verdict === VERDICTS.NO_DESIRED).length;
+	const unread = results.filter(
+		(r) => r.verdict === VERDICTS.UNREADABLE,
+	).length;
+	const stale = results.filter(
+		(r) => r.verdict === VERDICTS.DRIFT || r.verdict === VERDICTS.ABSENT,
+	).length;
+	const norec = results.filter((r) => r.verdict === VERDICTS.NO_DESIRED).length;
 
-  console.log(`\n${results.length} fields: ${results.length - unread - stale - norec} match, ${stale} stale, ${norec} not in the record, ${unread} unreadable`);
+	console.log(
+		`\n${results.length} fields: ${results.length - unread - stale - norec} match, ${stale} stale, ${norec} not in the record, ${unread} unreadable`,
+	);
 
-  if (unread) {
-    console.error("\nThe schema and the export disagree. A read selector stopped finding its field; fix schema.mjs before trusting any verdict above.");
-    process.exit(EXIT.broken);
-  }
-  if (age === null) {
-    console.error("\nThe mirror has no readable exportedAt, so its freshness is unknown. A comparison against a mirror of unknown age proves nothing.");
-    console.error("Re-run: LINKEDIN_CDP=1 node export.mjs, then this again.")
-    process.exit(EXIT.broken);
-  }
-  if (age > maxAgeDays) {
-    console.error(`\nThe mirror is ${age.toFixed(1)} days old (limit ${maxAgeDays}). A comparison against a stale mirror proves nothing.`);
-    console.error("Re-run: LINKEDIN_CDP=1 node export.mjs, then this again.")
-    process.exit(EXIT.broken);
-  }
-  process.exit(stale ? EXIT.stale : EXIT.clean);
+	if (unread) {
+		console.error(
+			"\nThe schema and the export disagree. A read selector stopped finding its field; fix schema.mjs before trusting any verdict above.",
+		);
+		process.exit(EXIT.broken);
+	}
+	if (age === null) {
+		console.error(
+			"\nThe mirror has no readable exportedAt, so its freshness is unknown. A comparison against a mirror of unknown age proves nothing.",
+		);
+		console.error("Re-run: LINKEDIN_CDP=1 node export.mjs, then this again.");
+		process.exit(EXIT.broken);
+	}
+	if (age > maxAgeDays) {
+		console.error(
+			`\nThe mirror is ${age.toFixed(1)} days old (limit ${maxAgeDays}). A comparison against a stale mirror proves nothing.`,
+		);
+		console.error("Re-run: LINKEDIN_CDP=1 node export.mjs, then this again.");
+		process.exit(EXIT.broken);
+	}
+	process.exit(stale ? EXIT.stale : EXIT.clean);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) main();

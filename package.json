@@ -10,7 +10,10 @@
     "init": "node src/init.mjs",
     "import": "node src/session-import.mjs",
     "export": "node src/export.mjs",
-    "drift": "node src/drift.mjs"
+    "drift": "node src/drift.mjs",
+    "lint": "biome ci --error-on-warnings .",
+    "format": "biome check --write .",
+    "test": "node src/drift.mjs --self-test && node src/copy-blocks.mjs --self-test"
   },
   "dependencies": {
     "@playwright/mcp": "0.0.80"
@@ -19,5 +22,10 @@
     "node": ">=22"
   },
   "license": "MIT",
-  "os": ["darwin"]
+  "os": [
+    "darwin"
+  ],
+  "devDependencies": {
+    "@biomejs/biome": "2.5.15"
+  }
 }

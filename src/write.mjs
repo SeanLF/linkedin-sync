@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+
 // Writes one field of your source-of-truth file (linkedin.md) to LinkedIn
 // through its own edit UI. The field is whatever the file declares.
 //
@@ -18,9 +19,9 @@
 // Run with LINKEDIN_CDP=1. After any save, prove it landed:
 //   node export.mjs && node drift.mjs   (the "saved" line is never the proof)
 
+import { parseBlocks } from "./copy-blocks.mjs";
 import { startMcp } from "./mcp.mjs";
 import { fieldsFromBlocks, MONTH_NAMES } from "./schema.mjs";
-import { parseBlocks } from "./copy-blocks.mjs";
 
 // Fields are whatever the source-of-truth file declares (id -> field def).
 const { byId: BY_ID } = fieldsFromBlocks(parseBlocks());
@@ -29,34 +30,51 @@ const { byId: BY_ID } = fieldsFromBlocks(parseBlocks());
 // before any surface URL below is read. The URLs are getters so they pick it
 // up lazily.
 let VANITY = process.env.LINKEDIN_VANITY || "";
-async function resolveVanity(mcp) { if (!VANITY) VANITY = await mcp.getVanity(); return VANITY; }
+async function resolveVanity(mcp) {
+	if (!VANITY) VANITY = await mcp.getVanity();
+	return VANITY;
+}
 
 // Where each edit surface lives. Deep links open the dialog directly; if
 // LinkedIn stops honouring one, the probe reports "no dialog" and this table
 // is what to fix.
 const SURFACES = {
-  // The intro dialog has one contenteditable and it is the headline; the
-  // probe found no accessible name on it, so the count assertion in the fill
-  // code is what keeps this honest if LinkedIn adds a second one.
-  intro: { get url() { return `https://www.linkedin.com/in/${VANITY}/edit/intro/`; }, control: '[contenteditable="true"]' },
-  about: { get url() { return `https://www.linkedin.com/in/${VANITY}/edit/forms/summary/new/`; }, control: '[contenteditable="true"]' },
-  // No deep link for an existing position without its URN, so open the
-  // experience list and click the edit control on the row for this company.
-  position: {
-    // No per-user deep link: a position editor URL carries a numeric id we
-    // cannot know for someone else's profile. So "url" is the experience list
-    // and open() finds the row by company match every time.
-    get url() { return `https://www.linkedin.com/in/${VANITY}/details/experience/`; },
-    get fallbackUrl() { return `https://www.linkedin.com/in/${VANITY}/details/experience/`; },
-    control: '[contenteditable="true"]',
-    // This editor carries "Share with your network" (probe 2026-09-11: Off).
-    // A save with it on tells every connection about an edit; refuse.
-    notifySwitch: true,
-    // With a role, the edit control's aria-label ("Edit <role> at <company>",
-    // seen 2026-10-05) is the only selector: rows of a grouped company nest, so
-    // the row fallback would see the company once for every role. The prefix
-    // match keeps "Software Engineer" from hitting "Senior Software Engineer".
-    open: (match, shot, role) => `
+	// The intro dialog has one contenteditable and it is the headline; the
+	// probe found no accessible name on it, so the count assertion in the fill
+	// code is what keeps this honest if LinkedIn adds a second one.
+	intro: {
+		get url() {
+			return `https://www.linkedin.com/in/${VANITY}/edit/intro/`;
+		},
+		control: '[contenteditable="true"]',
+	},
+	about: {
+		get url() {
+			return `https://www.linkedin.com/in/${VANITY}/edit/forms/summary/new/`;
+		},
+		control: '[contenteditable="true"]',
+	},
+	// No deep link for an existing position without its URN, so open the
+	// experience list and click the edit control on the row for this company.
+	position: {
+		// No per-user deep link: a position editor URL carries a numeric id we
+		// cannot know for someone else's profile. So "url" is the experience list
+		// and open() finds the row by company match every time.
+		get url() {
+			return `https://www.linkedin.com/in/${VANITY}/details/experience/`;
+		},
+		get fallbackUrl() {
+			return `https://www.linkedin.com/in/${VANITY}/details/experience/`;
+		},
+		control: '[contenteditable="true"]',
+		// This editor carries "Share with your network" (probe 2026-09-11: Off).
+		// A save with it on tells every connection about an edit; refuse.
+		notifySwitch: true,
+		// With a role, the edit control's aria-label ("Edit <role> at <company>",
+		// seen 2026-10-05) is the only selector: rows of a grouped company nest, so
+		// the row fallback would see the company once for every role. The prefix
+		// match keeps "Software Engineer" from hitting "Senior Software Engineer".
+		open: (match, shot, role) => `
 async (page) => {
   page.setDefaultTimeout(8000);
   await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
@@ -86,17 +104,21 @@ async (page) => {
     throw new Error('could not open the position editor: ' + e.message.split('\\n')[0] + ' | url=' + page.url() + ' | li count=' + lis + ' | see ' + ${JSON.stringify(shot)});
   }
 }`,
-  },
-  project: {
-    get url() { return `https://www.linkedin.com/in/${VANITY}/edit/forms/project/new/`; },
-    control: 'textarea',                 // Description is a plain textarea here, not a contenteditable
-    titleLabel: 'Project name',          // getByLabel; the visible label is "Project name*"
-    // An existing project has no stable deep link we know before opening the
-    // list: its editor URL carries a numeric id (probe 2026-09-12:
-    // /details/projects/edit/forms/<id>/). So open the list, let it lazy-load,
-    // and click the edit link LinkedIn labels "Edit project <title>".
-    get listUrl() { return `https://www.linkedin.com/in/${VANITY}/details/projects/`; },
-    openExisting: (title, shot) => `
+	},
+	project: {
+		get url() {
+			return `https://www.linkedin.com/in/${VANITY}/edit/forms/project/new/`;
+		},
+		control: "textarea", // Description is a plain textarea here, not a contenteditable
+		titleLabel: "Project name", // getByLabel; the visible label is "Project name*"
+		// An existing project has no stable deep link we know before opening the
+		// list: its editor URL carries a numeric id (probe 2026-09-12:
+		// /details/projects/edit/forms/<id>/). So open the list, let it lazy-load,
+		// and click the edit link LinkedIn labels "Edit project <title>".
+		get listUrl() {
+			return `https://www.linkedin.com/in/${VANITY}/details/projects/`;
+		},
+		openExisting: (title, shot) => `
 async (page) => {
   page.setDefaultTimeout(8000);
   await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
@@ -135,7 +157,7 @@ async (page) => {
     throw new Error('could not open the project editor: ' + e.message.split('\\n')[0] + ' | url=' + page.url() + ' | edit links seen: ' + JSON.stringify(labels) + ' | see ' + ${JSON.stringify(shot)});
   }
 }`,
-  },
+	},
 };
 
 const args = process.argv.slice(2);
@@ -152,28 +174,44 @@ const noop = args.includes("--noop"); // save the field's current text back: pro
 const addSkillsIdx = args.indexOf("--add-skills");
 const addSkillsField = addSkillsIdx === -1 ? null : args[addSkillsIdx + 1];
 if (addSkillsField) {
-  const field = BY_ID.get(addSkillsField);
-  if (!field?.skills) { console.error(`no skills list on ${addSkillsField}`); process.exit(1); }
-  const surface = SURFACES[field.write.surface];
-  const { readFileSync } = await import("node:fs");
-  const mirror = JSON.parse(readFileSync(new URL("./mirror.json", import.meta.url), "utf8"));
-  const have = new Set((field.readSkills?.(mirror) ?? []).map((s) => s.toLowerCase()));
-  const want = field.skills.filter((s) => !have.has(s.toLowerCase()));
-  if (!want.length) { console.log(`all ${field.skills.length} desired skills already present; nothing to add`); process.exit(0); }
-  console.log(`adding ${want.length} of ${field.skills.length} skills (missing): ${want.join(", ")}`);
-  const mcp = startMcp({ clientName: "linkedin-write" });
-  const shot = `/tmp/claude-501/linkedin-addskills.png`;
-  try {
-    await mcp.init();
-    await resolveVanity(mcp);
-    await mcp.ensureLoggedIn(VANITY);
-    // One skill per fresh editor open + Save. A single browser call that does
-    // the whole loop crashes the headless CDP Chrome partway (2026-09-12); the
-    // writes that hold all day are each one dialog and one Save, so match that.
-    const added = [], skipped = [];
-    for (const skill of want) {
-      await mcp.callTool("browser_navigate", { url: surface.url }, 60000);
-      const raw = await mcp.runCode(`
+	const field = BY_ID.get(addSkillsField);
+	if (!field?.skills) {
+		console.error(`no skills list on ${addSkillsField}`);
+		process.exit(1);
+	}
+	const surface = SURFACES[field.write.surface];
+	const { readFileSync } = await import("node:fs");
+	const mirror = JSON.parse(
+		readFileSync(new URL("./mirror.json", import.meta.url), "utf8"),
+	);
+	const have = new Set(
+		(field.readSkills?.(mirror) ?? []).map((s) => s.toLowerCase()),
+	);
+	const want = field.skills.filter((s) => !have.has(s.toLowerCase()));
+	if (!want.length) {
+		console.log(
+			`all ${field.skills.length} desired skills already present; nothing to add`,
+		);
+		process.exit(0);
+	}
+	console.log(
+		`adding ${want.length} of ${field.skills.length} skills (missing): ${want.join(", ")}`,
+	);
+	const mcp = startMcp({ clientName: "linkedin-write" });
+	const shot = `/tmp/claude-501/linkedin-addskills.png`;
+	try {
+		await mcp.init();
+		await resolveVanity(mcp);
+		await mcp.ensureLoggedIn(VANITY);
+		// One skill per fresh editor open + Save. A single browser call that does
+		// the whole loop crashes the headless CDP Chrome partway (2026-09-12); the
+		// writes that hold all day are each one dialog and one Save, so match that.
+		const added = [],
+			skipped = [];
+		for (const skill of want) {
+			await mcp.callTool("browser_navigate", { url: surface.url }, 60000);
+			const raw = await mcp.runCode(
+				`
 async (page) => {
   page.setDefaultTimeout(12000);
   await page.waitForTimeout(1200);
@@ -213,46 +251,75 @@ async (page) => {
   const gone = await dialog.waitFor({ state: 'hidden', timeout: 20000 }).then(() => true, () => false);
   await page.waitForTimeout(1000);
   return JSON.stringify({ skill, state: nowChip ? 'added' : 'clicked-unconfirmed', savedDialogGone: gone });
-}`, 90000);
-      let r; try { r = JSON.parse(raw); } catch { r = { skill, state: 'non-json', raw: raw.slice(0, 200) }; }
-      if (/^(added|already-present|clicked-unconfirmed|would-add|would-add-unconfirmed)$/.test(r.state)) added.push(r);
-      else skipped.push(r);
-      console.log(`  ${skill}: ${r.state}`);
-    }
-    const out = { added, skipped };
-    {
-          console.log(`\n  added/present: ${out.added.map((a) => a.skill).join(", ") || "none"}`);
-      if (out.skipped.length) console.log(`  needs a look: ${out.skipped.map((r) => `${r.skill} (${r.state})`).join(", ")}`);
-      console.log("\nNow prove it: LINKEDIN_CDP=1 node export.mjs && node drift.mjs");
-      process.exit(out.skipped.length ? 1 : 0);
-    }
-  } catch (err) {
-    console.error(`\nFailed: ${err.message}\n  screenshot, if any: ${shot}`);
-    process.exit(2);
-  } finally {
-    try { await mcp.callTool("browser_close", {}, 5000); } catch {}
-    mcp.close();
-  }
+}`,
+				90000,
+			);
+			let r;
+			try {
+				r = JSON.parse(raw);
+			} catch {
+				r = { skill, state: "non-json", raw: raw.slice(0, 200) };
+			}
+			if (
+				/^(added|already-present|clicked-unconfirmed|would-add|would-add-unconfirmed)$/.test(
+					r.state,
+				)
+			)
+				added.push(r);
+			else skipped.push(r);
+			console.log(`  ${skill}: ${r.state}`);
+		}
+		const out = { added, skipped };
+		console.log(
+			`\n  added/present: ${out.added.map((a) => a.skill).join(", ") || "none"}`,
+		);
+		if (out.skipped.length)
+			console.log(
+				`  needs a look: ${out.skipped.map((r) => `${r.skill} (${r.state})`).join(", ")}`,
+			);
+		console.log(
+			"\nNow prove it: LINKEDIN_CDP=1 node export.mjs && node drift.mjs",
+		);
+		process.exit(out.skipped.length ? 1 : 0);
+	} catch (err) {
+		console.error(`\nFailed: ${err.message}\n  screenshot, if any: ${shot}`);
+		process.exit(2);
+	} finally {
+		try {
+			await mcp.callTool("browser_close", {}, 5000);
+		} catch {}
+		mcp.close();
+	}
 }
 
 const deleteIdx = args.indexOf("--delete-project");
 const deleteTitle = deleteIdx === -1 ? null : args[deleteIdx + 1];
 const fieldId = deleteTitle ? null : args.find((a) => !a.startsWith("--"));
-if (!fieldId && !deleteTitle) { console.error("Usage: linkedin-write.mjs [--probe|--dry-run|--noop] <field-id>  |  linkedin-write.mjs [--dry-run] --delete-project \"<title>\""); process.exit(1); }
+if (!fieldId && !deleteTitle) {
+	console.error(
+		'Usage: linkedin-write.mjs [--probe|--dry-run|--noop] <field-id>  |  linkedin-write.mjs [--dry-run] --delete-project "<title>"',
+	);
+	process.exit(1);
+}
 if (deleteTitle) {
-  const mcp = startMcp({ clientName: "linkedin-write" });
-  const shot = `/tmp/claude-501/linkedin-${dryRun ? "dry" : "save"}-delete.png`;
-  try {
-    await mcp.init();
-    await resolveVanity(mcp);
-    await mcp.ensureLoggedIn(VANITY);
-    const surface = SURFACES.project;
-    console.log(`Opening ${surface.listUrl} to find the editor for "${deleteTitle}"`);
-    await mcp.callTool("browser_navigate", { url: surface.listUrl }, 60000);
-    const found = JSON.parse(await mcp.runCode(surface.openExisting(deleteTitle, shot), 60000));
-    console.log(`  ${found.label} -> ${found.href}`);
-    await mcp.callTool("browser_navigate", { url: found.href }, 60000);
-    const raw = await mcp.runCode(`
+	const mcp = startMcp({ clientName: "linkedin-write" });
+	const shot = `/tmp/claude-501/linkedin-${dryRun ? "dry" : "save"}-delete.png`;
+	try {
+		await mcp.init();
+		await resolveVanity(mcp);
+		await mcp.ensureLoggedIn(VANITY);
+		const surface = SURFACES.project;
+		console.log(
+			`Opening ${surface.listUrl} to find the editor for "${deleteTitle}"`,
+		);
+		await mcp.callTool("browser_navigate", { url: surface.listUrl }, 60000);
+		const found = JSON.parse(
+			await mcp.runCode(surface.openExisting(deleteTitle, shot), 60000),
+		);
+		console.log(`  ${found.label} -> ${found.href}`);
+		await mcp.callTool("browser_navigate", { url: found.href }, 60000);
+		const raw = await mcp.runCode(
+			`
 async (page) => {
   page.setDefaultTimeout(5000);
   await page.waitForTimeout(1000);
@@ -284,25 +351,48 @@ async (page) => {
   const gone = await editor.waitFor({ state: 'hidden', timeout: 20000 }).then(() => true, () => false);
   let after = null; try { await page.waitForTimeout(1500); await page.screenshot({ path: ${JSON.stringify(shot)} }); after = page.url(); } catch (e) { after = 'page closed after confirm (headless does this; the export decides)'; }
   return JSON.stringify({ mode: 'delete', title, confirmText: text, editorGone: gone, after });
-}`, 120000);
-    let out; try { out = JSON.parse(raw); } catch { throw new Error(`delete returned non-JSON:\n${raw.slice(0, 400)}`); }
-    if (out.error) { console.error(`\n${out.error}\n  see: ${shot}`); process.exit(2); }
-    console.log(JSON.stringify(out, null, 2));
-    if (!dryRun) console.log("\nNow prove it: LINKEDIN_CDP=1 node export.mjs && node drift.mjs");
-    process.exit(0);
-  } catch (err) {
-    console.error(`\nFailed: ${err.message}\n  screenshot, if any: ${shot}`);
-    process.exit(2);
-  } finally {
-    try { await mcp.callTool("browser_close", {}, 5000); } catch {}
-    mcp.close();
-  }
+}`,
+			120000,
+		);
+		let out;
+		try {
+			out = JSON.parse(raw);
+		} catch {
+			throw new Error(`delete returned non-JSON:\n${raw.slice(0, 400)}`);
+		}
+		if (out.error) {
+			console.error(`\n${out.error}\n  see: ${shot}`);
+			process.exit(2);
+		}
+		console.log(JSON.stringify(out, null, 2));
+		if (!dryRun)
+			console.log(
+				"\nNow prove it: LINKEDIN_CDP=1 node export.mjs && node drift.mjs",
+			);
+		process.exit(0);
+	} catch (err) {
+		console.error(`\nFailed: ${err.message}\n  screenshot, if any: ${shot}`);
+		process.exit(2);
+	} finally {
+		try {
+			await mcp.callTool("browser_close", {}, 5000);
+		} catch {}
+		mcp.close();
+	}
 }
 
 const field = BY_ID.get(fieldId);
-if (!field) { console.error(`Unknown field "${fieldId}". Known: ${[...BY_ID.keys()].join(", ")}`); process.exit(1); }
+if (!field) {
+	console.error(
+		`Unknown field "${fieldId}". Known: ${[...BY_ID.keys()].join(", ")}`,
+	);
+	process.exit(1);
+}
 const surface = SURFACES[field.write.surface];
-if (!surface) { console.error(`No surface "${field.write.surface}" for ${fieldId} yet`); process.exit(1); }
+if (!surface) {
+	console.error(`No surface "${field.write.surface}" for ${fieldId} yet`);
+	process.exit(1);
+}
 
 // Playwright code that runs inside the MCP server with a live `page`.
 // Returns JSON describing every text control in the open dialog: the probe's
@@ -387,8 +477,18 @@ async (page) => {
 // point of view: one input event carrying the whole string, so LinkedIn's
 // own handler decides how a newline becomes a paragraph. keyboard.type would
 // fire a keystroke per character and the editor's autocomplete gets a vote.
-function fillCode({ control, text, mode, shot, title, titleLabel, notifySwitch, dates, editing }) {
-  return `
+function fillCode({
+	control,
+	text,
+	mode,
+	shot,
+	title,
+	titleLabel,
+	notifySwitch,
+	dates,
+	editing,
+}) {
+	return `
 async (page) => {
   page.setDefaultTimeout(5000);
   const MODE = ${JSON.stringify(mode)};
@@ -506,109 +606,206 @@ async (page) => {
 const mcp = startMcp({ clientName: "linkedin-write" });
 
 try {
- try {
-  await mcp.init();
-  await resolveVanity(mcp);
-  await mcp.ensureLoggedIn(VANITY);
+	try {
+		await mcp.init();
+		await resolveVanity(mcp);
+		await mcp.ensureLoggedIn(VANITY);
 
-  // A project that already exists on LinkedIn (per the mirror) is edited in
-  // place; one that does not is added through the "new" form. Both paths end
-  // in the same dialog, so everything after this is shared.
-  let existing;
-  if (field.write.createIfAbsent) {
-    const { readFileSync } = await import("node:fs");
-    const mirror = JSON.parse(readFileSync(new URL("./mirror.json", import.meta.url), "utf8"));
-    // No catch: a shape error here (Projects section missing from the mirror)
-    // must stop the run. Swallowed, it reads as "absent" and the tool adds a
-    // duplicate project on the live profile (review finding, 2026-09-12).
-    existing = field.read(mirror);
-  }
-  if (existing !== undefined && surface.openExisting) {
-    console.log(`Opening ${surface.listUrl} to find the editor for "${field.linkedinTitle}" (present in the mirror)`);
-    await mcp.callTool("browser_navigate", { url: surface.listUrl }, 60000);
-    const found = JSON.parse(await mcp.runCode(surface.openExisting(field.linkedinTitle, SHOT), 60000));
-    console.log(`  ${found.label} -> ${found.href}`);
-    await mcp.callTool("browser_navigate", { url: found.href }, 60000);
-    if (process.env.LINKEDIN_TRACE) console.log("  trace after editor navigate:", await mcp.runCode(`async (page) => { await page.waitForTimeout(1500); return JSON.stringify({ url: page.url(), dialogs: await page.getByRole('dialog').count() }); }`, 30000));
-  } else {
-    console.log(`Opening ${surface.url}`);
-    await mcp.callTool("browser_navigate", { url: surface.url }, 60000);
-  }
-  if (surface.open) {
-    const dialogsRaw = (await mcp.runCode(`async (page) => { await page.waitForTimeout(2500); return String(await page.getByRole('dialog').count()); }`, 20000)).trim();
-    if (!/^\d+$/.test(dialogsRaw)) throw new Error(`dialog-count probe returned non-numeric output: ${dialogsRaw.slice(0, 200)}`);
-    const dialogs = Number(dialogsRaw);
-    if (dialogs === 0) {
-      console.log("Deep link opened no editor; falling back to the list and its edit control.");
-      await mcp.callTool("browser_navigate", { url: surface.fallbackUrl }, 60000);
-      const match = field.write.company;
-      if (!match) throw new Error(`${fieldId} has no match="Company" to find its position row`);
-      const role = field.write.role;
-      console.log(`Opening the editor for ${role ? `"${role}" at ` : "the row matching "}${JSON.stringify(match)}: ${await mcp.runCode(surface.open(match, SHOT, role), 60000)}`);
-    }
-  }
+		// A project that already exists on LinkedIn (per the mirror) is edited in
+		// place; one that does not is added through the "new" form. Both paths end
+		// in the same dialog, so everything after this is shared.
+		let existing;
+		if (field.write.createIfAbsent) {
+			const { readFileSync } = await import("node:fs");
+			const mirror = JSON.parse(
+				readFileSync(new URL("./mirror.json", import.meta.url), "utf8"),
+			);
+			// No catch: a shape error here (Projects section missing from the mirror)
+			// must stop the run. Swallowed, it reads as "absent" and the tool adds a
+			// duplicate project on the live profile (review finding, 2026-09-12).
+			existing = field.read(mirror);
+		}
+		if (existing !== undefined && surface.openExisting) {
+			console.log(
+				`Opening ${surface.listUrl} to find the editor for "${field.linkedinTitle}" (present in the mirror)`,
+			);
+			await mcp.callTool("browser_navigate", { url: surface.listUrl }, 60000);
+			const found = JSON.parse(
+				await mcp.runCode(
+					surface.openExisting(field.linkedinTitle, SHOT),
+					60000,
+				),
+			);
+			console.log(`  ${found.label} -> ${found.href}`);
+			await mcp.callTool("browser_navigate", { url: found.href }, 60000);
+			if (process.env.LINKEDIN_TRACE)
+				console.log(
+					"  trace after editor navigate:",
+					await mcp.runCode(
+						`async (page) => { await page.waitForTimeout(1500); return JSON.stringify({ url: page.url(), dialogs: await page.getByRole('dialog').count() }); }`,
+						30000,
+					),
+				);
+		} else {
+			console.log(`Opening ${surface.url}`);
+			await mcp.callTool("browser_navigate", { url: surface.url }, 60000);
+		}
+		if (surface.open) {
+			const dialogsRaw = (
+				await mcp.runCode(
+					`async (page) => { await page.waitForTimeout(2500); return String(await page.getByRole('dialog').count()); }`,
+					20000,
+				)
+			).trim();
+			if (!/^\d+$/.test(dialogsRaw))
+				throw new Error(
+					`dialog-count probe returned non-numeric output: ${dialogsRaw.slice(0, 200)}`,
+				);
+			const dialogs = Number(dialogsRaw);
+			if (dialogs === 0) {
+				console.log(
+					"Deep link opened no editor; falling back to the list and its edit control.",
+				);
+				await mcp.callTool(
+					"browser_navigate",
+					{ url: surface.fallbackUrl },
+					60000,
+				);
+				const match = field.write.company;
+				if (!match)
+					throw new Error(
+						`${fieldId} has no match="Company" to find its position row`,
+					);
+				const role = field.write.role;
+				console.log(
+					`Opening the editor for ${role ? `"${role}" at ` : "the row matching "}${JSON.stringify(match)}: ${await mcp.runCode(surface.open(match, SHOT, role), 60000)}`,
+				);
+			}
+		}
 
-  const described = await mcp.runCode(DESCRIBE_DIALOG, 90000);
-  let dialog;
-  try { dialog = JSON.parse(described); } catch { throw new Error(`Dialog probe returned non-JSON:\n${described}`); }
-  if (typeof dialog !== "object" || dialog === null) throw new Error(`Dialog probe returned ${typeof dialog}:\n${described.slice(0, 400)}`);
-  if (dialog.error) {
-    console.error(`\n${dialog.error}\n  url:     ${dialog.url}\n  title:   ${dialog.title}\n  dialogs: ${dialog.dialogs}\n  see:     ${dialog.screenshot}`);
-    process.exit(2);
-  }
+		const described = await mcp.runCode(DESCRIBE_DIALOG, 90000);
+		let dialog;
+		try {
+			dialog = JSON.parse(described);
+		} catch {
+			throw new Error(`Dialog probe returned non-JSON:\n${described}`);
+		}
+		if (typeof dialog !== "object" || dialog === null)
+			throw new Error(
+				`Dialog probe returned ${typeof dialog}:\n${described.slice(0, 400)}`,
+			);
+		if (dialog.error) {
+			console.error(
+				`\n${dialog.error}\n  url:     ${dialog.url}\n  title:   ${dialog.title}\n  dialogs: ${dialog.dialogs}\n  see:     ${dialog.screenshot}`,
+			);
+			process.exit(2);
+		}
 
-  console.log("\nDialog:", dialog.heading ?? "(no heading)");
-  console.log("URL:   ", dialog.url);
-  console.log("\nControls:");
-  for (const c of dialog.controls) {
-    const kind = c.editable === "true" ? `${c.tag}[ce]` : c.role ? `${c.tag}[${c.role}]` : c.tag;
-    console.log(`  ${kind.padEnd(14)} ${(c.label || c.ariaLabel || c.name || c.id || "?").slice(0, 34).padEnd(36)} max=${c.maxlength ?? "-"}  len=${String(c.valueLength).padStart(4)}  ${JSON.stringify(c.valueHead)}`);
-    if (c.checked !== null) console.log(`                 checked=${c.checked}  near: ${JSON.stringify(c.context)}`);
-  }
-  console.log("\nButtons:", dialog.buttons.filter(Boolean).join(" | "));
+		console.log("\nDialog:", dialog.heading ?? "(no heading)");
+		console.log("URL:   ", dialog.url);
+		console.log("\nControls:");
+		for (const c of dialog.controls) {
+			const kind =
+				c.editable === "true"
+					? `${c.tag}[ce]`
+					: c.role
+						? `${c.tag}[${c.role}]`
+						: c.tag;
+			console.log(
+				`  ${kind.padEnd(14)} ${(c.label || c.ariaLabel || c.name || c.id || "?").slice(0, 34).padEnd(36)} max=${c.maxlength ?? "-"}  len=${String(c.valueLength).padStart(4)}  ${JSON.stringify(c.valueHead)}`,
+			);
+			if (c.checked !== null)
+				console.log(
+					`                 checked=${c.checked}  near: ${JSON.stringify(c.context)}`,
+				);
+		}
+		console.log("\nButtons:", dialog.buttons.filter(Boolean).join(" | "));
 
-  if (probe) {
-    console.log("\n--probe: nothing changed.");
-    process.exit(0);
-  }
+		if (probe) {
+			console.log("\n--probe: nothing changed.");
+			process.exit(0);
+		}
 
-  const desired = noop ? null : parseBlocks().get(fieldId)?.text;
-  if (!noop && !desired) throw new Error(`your source-of-truth file has no block for "${fieldId}"`);
-  const mode = dryRun ? "dry" : noop ? "noop" : "save";
-  console.log(`\n${{ dry: "--dry-run: filling, not saving", noop: "--noop: re-saving current text", save: "Writing" }[mode]} ${fieldId}${desired ? ` (${[...desired].length} chars)` : ""}.`);
+		const desired = noop ? null : parseBlocks().get(fieldId)?.text;
+		if (!noop && !desired)
+			throw new Error(
+				`your source-of-truth file has no block for "${fieldId}"`,
+			);
+		const mode = dryRun ? "dry" : noop ? "noop" : "save";
+		console.log(
+			`\n${{ dry: "--dry-run: filling, not saving", noop: "--noop: re-saving current text", save: "Writing" }[mode]} ${fieldId}${desired ? ` (${[...desired].length} chars)` : ""}.`,
+		);
 
-  if (existing !== undefined && dialog.heading && !/edit/i.test(dialog.heading)) {
-    throw new Error(`${fieldId} exists on LinkedIn but the open dialog is "${dialog.heading}", not an editor; not saving`);
-  }
-  if (field.write.match?.subtitle) {
-    // The position editor must be the one for this company, whichever path opened it.
-    const re = field.write.match.subtitle;
-    if (!dialog.controls.some((c) => re.test(c.valueHead ?? "") || re.test(c.label ?? ""))) {
-      throw new Error(`the open position editor shows no control matching ${re}; not saving`);
-    }
-  }
-  const raw = await mcp.runCode(fillCode({
-    control: surface.control, text: desired ?? "", mode, shot: SHOT,
-    title: surface.titleLabel ? field.linkedinTitle : undefined, titleLabel: surface.titleLabel,
-    notifySwitch: surface.notifySwitch, dates: field.dates, editing: existing !== undefined,
-  }), 120000);
-  let out;
-  try { out = JSON.parse(raw); } catch { throw new Error(`fill returned non-JSON:\n${raw.slice(0, 400)}`); }
-  if (out.error) {
-    console.error(`\n${out.error}${out.after ? `\n  field now reads: ${JSON.stringify(out.after)}` : ""}\n  see: ${SHOT}`);
-    process.exit(2);
-  }
-  console.log(`  before: ${out.beforeLength} chars  after: ${out.afterLength} chars  matches desired: ${out.matches}`);
-  if (out.dates) console.log(`  dates read back: ${JSON.stringify(out.dates)}`);
-  if (!out.matches && out.after) console.log(`  field reads: ${JSON.stringify(out.after)}`);
-  console.log(`  ${mode === "dry" ? "discarded" : "saved"}; dialog ${out.dialogGone ? "closed" : "STILL OPEN"}${out.notifyNetwork ? `; share-with-network was ${out.notifyNetwork}` : ""}${out.pageClosedAfterSave ? "; page closed after Save (headless does this; the export decides)" : ""}; see ${SHOT}`);
-  if (mode !== "dry") console.log("\nNow prove it: LINKEDIN_CDP=1 node export.mjs && node drift.mjs");
-  process.exit(out.matches ? 0 : 1);
- } catch (err) {
-  console.error(`\nFailed: ${err.message}\n  screenshot, if any: ${SHOT}`);
-  process.exitCode = 2;
- }
+		if (
+			existing !== undefined &&
+			dialog.heading &&
+			!/edit/i.test(dialog.heading)
+		) {
+			throw new Error(
+				`${fieldId} exists on LinkedIn but the open dialog is "${dialog.heading}", not an editor; not saving`,
+			);
+		}
+		if (field.write.match?.subtitle) {
+			// The position editor must be the one for this company, whichever path opened it.
+			const re = field.write.match.subtitle;
+			if (
+				!dialog.controls.some(
+					(c) => re.test(c.valueHead ?? "") || re.test(c.label ?? ""),
+				)
+			) {
+				throw new Error(
+					`the open position editor shows no control matching ${re}; not saving`,
+				);
+			}
+		}
+		const raw = await mcp.runCode(
+			fillCode({
+				control: surface.control,
+				text: desired ?? "",
+				mode,
+				shot: SHOT,
+				title: surface.titleLabel ? field.linkedinTitle : undefined,
+				titleLabel: surface.titleLabel,
+				notifySwitch: surface.notifySwitch,
+				dates: field.dates,
+				editing: existing !== undefined,
+			}),
+			120000,
+		);
+		let out;
+		try {
+			out = JSON.parse(raw);
+		} catch {
+			throw new Error(`fill returned non-JSON:\n${raw.slice(0, 400)}`);
+		}
+		if (out.error) {
+			console.error(
+				`\n${out.error}${out.after ? `\n  field now reads: ${JSON.stringify(out.after)}` : ""}\n  see: ${SHOT}`,
+			);
+			process.exit(2);
+		}
+		console.log(
+			`  before: ${out.beforeLength} chars  after: ${out.afterLength} chars  matches desired: ${out.matches}`,
+		);
+		if (out.dates)
+			console.log(`  dates read back: ${JSON.stringify(out.dates)}`);
+		if (!out.matches && out.after)
+			console.log(`  field reads: ${JSON.stringify(out.after)}`);
+		console.log(
+			`  ${mode === "dry" ? "discarded" : "saved"}; dialog ${out.dialogGone ? "closed" : "STILL OPEN"}${out.notifyNetwork ? `; share-with-network was ${out.notifyNetwork}` : ""}${out.pageClosedAfterSave ? "; page closed after Save (headless does this; the export decides)" : ""}; see ${SHOT}`,
+		);
+		if (mode !== "dry")
+			console.log(
+				"\nNow prove it: LINKEDIN_CDP=1 node export.mjs && node drift.mjs",
+			);
+		process.exit(out.matches ? 0 : 1);
+	} catch (err) {
+		console.error(`\nFailed: ${err.message}\n  screenshot, if any: ${SHOT}`);
+		process.exitCode = 2;
+	}
 } finally {
-  try { await mcp.callTool("browser_close", {}, 5000); } catch {}
-  mcp.close();
+	try {
+		await mcp.callTool("browser_close", {}, 5000);
+	} catch {}
+	mcp.close();
 }
