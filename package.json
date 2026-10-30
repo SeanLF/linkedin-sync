@@ -15,17 +15,25 @@
     "format": "biome check --write .",
     "test": "node src/drift.mjs --self-test && node src/copy-blocks.mjs --self-test && node src/inpage.check.mjs && node src/write.check.mjs && node src/inpage.fixture.mjs"
   },
-  "dependencies": {
-    "@playwright/mcp": "0.0.80"
-  },
   "engines": {
-    "node": ">=22"
+    "node": ">=26"
   },
   "license": "MIT",
   "os": [
     "darwin"
   ],
   "devDependencies": {
-    "@biomejs/biome": "2.5.15"
+    "@biomejs/biome": "2.6.4",
+    "@types/mdast": "4.0.4",
+    "@types/node": "26.6.6",
+    "knip": "6.44.0",
+    "typescript": "7.0.2"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.4.0",
+    "@playwright/test": "1.64.1",
+    "diff": "9.0.0",
+    "mdast-util-from-markdown": "2.1.0",
+    "zod": "4.6.7"
   }
 }

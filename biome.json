@@ -1,27 +1,97 @@
 {
+	"$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
 	"vcs": {
 		"enabled": true,
 		"clientKind": "git",
 		"useIgnoreFile": true
 	},
+	"files": {
+		"includes": [
+			"**",
+			"!src/**/*.mjs",
+			"!src/**/*.js"
+		]
+	},
+	"linter": {
+		"domains": {
+			"project": "all",
+			"test": "all",
+			"playwright": "all"
+		},
+		"rules": {
+			"complexity": {
+				"noExcessiveCognitiveComplexity": {
+					"level": "error",
+					"options": {
+						"maxAllowedComplexity": 20
+					}
+				},
+				"useLiteralKeys": "off",
+				"noExcessiveLinesPerFunction": "off"
+			},
+			"style": {
+				"noNonNullAssertion": "error",
+				"useBlockStatements": "off",
+				"useConsistentArrayType": {
+					"level": "error",
+					"options": {
+						"syntax": "shorthand"
+					}
+				},
+				"useExportType": "error",
+				"useImportType": "error",
+				"useNodejsImportProtocol": "error",
+				"noParameterAssign": "error",
+				"useDefaultSwitchClause": "off",
+				"noTernary": "off",
+				"noMagicNumbers": "off",
+				"useNamingConvention": "off",
+				"useNamedCaptureGroup": "off",
+				"useExplicitLengthCheck": "off",
+				"useExportsLast": "off",
+				"noProcessEnv": "off",
+				"noExcessiveLinesPerFile": "off",
+				"noIncrementDecrement": "off",
+				"noExcessiveClassesPerFile": "off",
+				"noContinue": "off",
+				"useDestructuring": "off"
+			},
+			"suspicious": {
+				"noConsole": "off",
+				"noExplicitAny": "error",
+				"noUnnecessaryConditions": "off"
+			},
+			"nursery": {
+				"noFloatingPromises": "error",
+				"noMisusedPromises": "error",
+				"useAwaitThenable": "error",
+				"noUnsafePlusOperands": "error",
+				"useExhaustiveSwitchCases": "error"
+			},
+			"preset": "all",
+			"performance": {
+				"useTopLevelRegex": "off",
+				"noAwaitInLoops": "off"
+			},
+			"correctness": {
+				"noNodejsModules": "off",
+				"useQwikValidLexicalScope": "off",
+				"noUnresolvedImports": "off"
+			},
+			"security": {
+				"noSecrets": "off"
+			}
+		}
+	},
 	"overrides": [
 		{
-			"includes": ["package.json"],
+			"includes": [
+				"package.json"
+			],
 			"formatter": {
 				"indentStyle": "space",
 				"indentWidth": 2
 			}
-		},
-		{
-			"includes": ["src/inpage.mjs"],
-			"linter": {
-				"rules": {
-					"correctness": {
-						"noUndeclaredVariables": "error"
-					}
-				}
-			}
 		}
-	],
-	"$schema": "./node_modules/@biomejs/biome/configuration_schema.json"
+	]
 }
