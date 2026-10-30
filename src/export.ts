@@ -596,7 +596,8 @@ export async function exportProfile(
 	};
 
 	// The name and headline first: without your own Profile record the export
-	// cannot succeed, so it stops before any section read goes out.
+	// cannot succeed, so it stops before any section read goes out. That costs
+	// one round trip on every export, on purpose.
 	const [info, cards] = await Promise.all([
 		graph(`profileUrn:${urn}`, QUERY.cards),
 		graph(`profileUrn:${urn}`, QUERY.cards2),

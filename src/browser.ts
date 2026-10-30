@@ -105,7 +105,8 @@ function voyager(request: APIRequestContext, csrf: string): Voyager {
 			},
 			maxRedirects: 0,
 		});
-		// A call in flight when another got the 429 stops here too.
+		// A call in flight when another got the 429 stops here too, its answer
+		// discarded on purpose: a stop ends the read, partial data included.
 		if (stopped) throw new StopError("stopped after LinkedIn answered 429");
 		if (r.status() === 429) {
 			stopped = true;

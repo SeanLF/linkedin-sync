@@ -9,6 +9,7 @@ import {
 	runAddSkill,
 	runDelete,
 	runEditor,
+	runRemoveMedia,
 	TIMEOUTS,
 } from "../src/editor.ts";
 import type { Editor } from "../src/fields.ts";
@@ -276,4 +277,25 @@ it("a dry run reports what the real run would refuse, with its read-back", async
 	expect(out.outcome).toMatch(/would refuse: .*is ON/u);
 	expect(out.results.every((r) => r.ok)).toBe(true); // and the read-back is still shown
 	await expect(page.getByRole("dialog")).toHaveCount(0);
+});
+
+it("removing media checks the project's share switch before any click", async ({
+	page,
+}) => {
+	await page.setContent(`<!doctype html><meta charset="utf-8">
+<div role="dialog" id="ed"><h2>Edit project</h2>
+	<span role="switch" aria-checked="true" aria-label="Notify network"></span>
+	<label for="n">Project name*</label><input id="n" value="Widget">
+	<a href="#" id="m" onclick="window.clicked = true">Edit media, Repo</a>
+	<button aria-label="Dismiss" onclick="ed.remove()">x</button><button>Save</button>
+</div>
+<script>window.clicked = false;</script>`);
+	await expect(runRemoveMedia(page, "Widget", "Repo", false)).rejects.toThrow(
+		/is ON/u,
+	);
+	expect(
+		await page.evaluate(
+			() => (globalThis as unknown as { clicked: boolean }).clicked,
+		),
+	).toBe(false);
 });

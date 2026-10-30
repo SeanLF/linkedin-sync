@@ -208,6 +208,17 @@ async function quietness(
 	};
 }
 
+/** The one share-switch guard: every Save, and every click that can save, goes through it. */
+async function assertQuiet(
+	page: Page,
+	dialog: Locator,
+	notify: Notify,
+): Promise<{ ok: boolean; says: string }> {
+	const quiet = await quietness(dialog, notify);
+	if (!quiet.ok) await refuse(page, dialog, quiet.says);
+	return quiet;
+}
+
 /** Close the editor unsaved, then refuse: a half-filled dialog must not be left in the next step's way. */
 async function refuse(
 	page: Page,
@@ -229,8 +240,7 @@ async function save(
 	notify: Notify = "if-present",
 ): Promise<string> {
 	// Every Save goes through here, and none with the share switch on.
-	const quiet = await quietness(dialog, notify);
-	if (!quiet.ok) await refuse(page, dialog, quiet.says);
+	const quiet = await assertQuiet(page, dialog, notify);
 	await dialog.getByRole("button", { name: "Save", exact: true }).click();
 	try {
 		await dialog.waitFor({ state: "hidden", timeout: TIMEOUTS.close });
@@ -299,15 +309,22 @@ export async function runEditor(
 		.toBe(true)
 		.catch(() => undefined);
 	const results = await readAll();
-	// A dry run refuses whatever the real run would, then discards.
+	// A dry run reports what the real run would refuse, with its read-back, then discards.
 	if (mode === "dry") {
 		const quiet = await quietness(dialog, ed.notify);
-		await discard(page, dialog);
-		const ok = quiet.ok && results.every((r) => r.ok);
+		const readBack = results.every((r) => r.ok);
+		const why = [
+			readBack ? "" : "the editor does not read back as the record",
+			quiet.ok ? "" : quiet.says,
+		].filter(Boolean);
+		const closed = await discard(page, dialog).then(
+			() => "discarded",
+			(e: Error) => `could not be closed (${e.message.split("\n")[0]})`,
+		);
 		return {
 			results,
-			ok,
-			outcome: `discarded (${quiet.ok ? quiet.says : `a real run would refuse: ${quiet.says}`})`,
+			ok: !why.length,
+			outcome: `${closed} (${why.length ? `a real run would refuse: ${why.join("; ")}` : quiet.says})`,
 		};
 	}
 	if (!results.every((r) => r.ok))
@@ -416,20 +433,20 @@ export async function runAddSkill(
 			() => box.inputValue(),
 			() => undefined,
 		);
+	if (picked === undefined)
+		await refuse(
+			page,
+			dialog,
+			`picking ${JSON.stringify(skill)} put something else in the box`,
+		);
 	if (dryRun) {
-		const quiet = await quietness(dialog, "if-present");
-		if (!quiet.ok) await refuse(page, dialog, quiet.says);
-	}
-	if (dryRun || picked === undefined) {
+		// As the real add would: with the switch on, it refuses.
+		await assertQuiet(page, dialog, "if-present");
 		await discard(page, dialog);
-		if (picked === undefined)
-			throw new Refused(
-				`picking ${JSON.stringify(skill)} put something else in the box`,
-			);
-		return picked.trim();
+		return (picked ?? "").trim();
 	}
 	await save(page, dialog);
-	return picked.trim();
+	return (picked ?? "").trim();
 }
 
 /** The open project editor, checked by its name. */
@@ -446,8 +463,7 @@ function projectEditor(page: Page, title: string): Promise<Locator> {
 
 /** The media flows can save the project before its own Save: check its share switch before any click. */
 async function assertProjectQuiet(page: Page, editor: Locator): Promise<void> {
-	const quiet = await quietness(editor, "if-present");
-	if (!quiet.ok) await refuse(page, editor, quiet.says);
+	await assertQuiet(page, editor, "if-present");
 }
 
 /** Close every open dialog unsaved. */
@@ -512,7 +528,10 @@ export async function runAddLink(
 	const formQuiet = await quietness(form, "if-present");
 	if (!formQuiet.ok) {
 		await discardAll(page);
-		throw new Refused(formQuiet.says);
+		const left = await page.getByRole("dialog").count();
+		throw new Refused(
+			`${formQuiet.says}${left ? `; ${left} dialog(s) could not be closed` : ""}`,
+		);
 	}
 	await confirm.click();
 	const projectSave = page
