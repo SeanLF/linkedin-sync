@@ -4,7 +4,7 @@
 // a selector stops finding its field, which is how a profile sits months
 // behind a green check.
 
-import { diffWords } from "diff";
+import { diffWordsWithSpace } from "diff";
 import {
 	type Facet,
 	type Field,
@@ -193,7 +193,7 @@ const flat = (s: string) => s.replaceAll("\n", "\\n");
 
 /** A changed span with a little context either side, as -[live]+{record}. */
 function wordDiff(live: string, desired: string): string {
-	const parts = diffWords(live, desired);
+	const parts = diffWordsWithSpace(live, desired);
 	const out: string[] = [];
 	parts.forEach((p, i) => {
 		if (p.added) out.push(`{+${flat(p.value)}+}`);
