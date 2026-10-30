@@ -25,7 +25,7 @@ if (!cmd || cmd === "--help" || cmd === "-h" || !COMMANDS[cmd]) {
 			`  import   copy your live LinkedIn session from Chrome into the automation browser\n` +
 			`  export   export your full profile to a JSON mirror (--connections for contacts)\n` +
 			`  drift    compare linkedin.md against your live profile\n` +
-			`  write    write one field to LinkedIn (--dry-run to rehearse)\n` +
+			`  write    write fields to LinkedIn: <field>... or --all-drift (--dry-run to rehearse)\n` +
 			`  blocks   list the fields in linkedin.md with their character counts\n\n` +
 			`Runs windowless by default. Be signed into linkedin.com in Chrome first.`,
 	);

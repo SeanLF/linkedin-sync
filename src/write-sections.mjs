@@ -21,6 +21,8 @@ import {
 	deleteEntry,
 	describeDialog,
 	fillForm,
+	removeProjectMedia,
+	takeScreenshot,
 } from "./inpage.mjs";
 import { startMcp } from "./mcp.mjs";
 import {
@@ -46,6 +48,12 @@ export const WRITE_FLAGS = [
 	"--delete",
 	"--add-link",
 	"--allow-mass-remove",
+	"--all-drift",
+	"--max-age-days",
+	"--remove-media",
+	"--screenshots",
+	"--json",
+	"--no-verify",
 ];
 /** The arguments that look like flags and are not ones write.mjs knows. */
 export const unknownFlags = (args) =>
@@ -76,27 +84,59 @@ const parseOut = (raw, what) => {
 };
 const at = (vanity, path) => `https://www.linkedin.com/in/${vanity}/${path}`;
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const PROVE =
-	"\nNow prove it: LINKEDIN_CDP=1 node src/export.mjs && node src/drift.mjs";
 
-/** One browser session: log in check, run, always detach. Returns an exit code. */
-export async function withBrowser(label, fn) {
-	const mcp = startMcp({ clientName: "linkedin-write" });
-	const shot = join(tmpdir(), `linkedin-${label}.png`);
+export const shotPath = (label) => join(tmpdir(), `linkedin-${label}.png`);
+
+/**
+ * One browser session for any number of steps: start the MCP server, read who
+ * is logged in, check the session once, run, always detach. `fn` gets the
+ * session (`mcp`, `vanity`, `screenshots`) and may replace `ctx.mcp` (a batch
+ * reconnecting after a crash); the one it leaves is the one closed. Returns
+ * an exit code.
+ */
+export async function withBrowser(fn, { screenshots = false } = {}) {
+	const ctx = { mcp: startMcp({ clientName: "linkedin-write" }), screenshots };
 	try {
-		await mcp.init();
-		const vanity = process.env.LINKEDIN_VANITY || (await mcp.getVanity());
-		await mcp.ensureLoggedIn(vanity);
-		return (await fn({ mcp, vanity, shot })) ?? 0;
+		await ctx.mcp.init();
+		ctx.vanity = process.env.LINKEDIN_VANITY || (await ctx.mcp.getVanity());
+		await ctx.mcp.ensureLoggedIn(ctx.vanity);
+		return (await fn(ctx)) ?? 0;
 	} catch (err) {
-		console.error(`\nFailed: ${err.message}\n  screenshot, if any: ${shot}`);
+		console.error(`\nFailed: ${err.message}`);
 		return 2;
 	} finally {
 		try {
-			await mcp.callTool("browser_close", {}, 5000);
+			await ctx.mcp.callTool("browser_close", {}, 5000);
 		} catch {}
-		mcp.close();
+		ctx.mcp.close();
 	}
+}
+
+/**
+ * One write inside a session. `shot` is where a screenshot of this step goes;
+ * `pageShot` is the same path when --screenshots asked for them and null
+ * otherwise, and is what the in-page functions get, so a passing step takes
+ * none. A failing one (non-zero, or thrown) gets one here, of the page as the
+ * failure left it.
+ */
+export async function step(ctx, label, fn) {
+	const sub = { ...ctx, shot: shotPath(label) };
+	sub.pageShot = ctx.screenshots ? sub.shot : null;
+	let code;
+	try {
+		code = (await fn(sub)) ?? 0;
+	} catch (err) {
+		console.error(`\nFailed: ${err.message}\n  screenshot: ${sub.shot}`);
+		code = 2;
+	}
+	if (code) await failureShot(sub);
+	return code;
+}
+
+export async function failureShot({ mcp, shot }) {
+	try {
+		await mcp.runFn(takeScreenshot, { shot }, 15000);
+	} catch {}
 }
 
 function printResults(out) {
@@ -108,7 +148,7 @@ function printResults(out) {
 
 /** Write one education / honour / publication / volunteer / certification block. */
 export async function writeFormField(
-	{ mcp, vanity, shot, mirror = readMirror() },
+	{ mcp, vanity, shot, pageShot, mirror = readMirror() },
 	field,
 	{ mode, probe, description },
 ) {
@@ -128,7 +168,7 @@ export async function writeFormField(
 	await mcp.callTool("browser_navigate", { url: target }, 60000);
 	if (probe) {
 		const d = parseOut(
-			await mcp.runFn(describeDialog, { shot }, 90000),
+			await mcp.runFn(describeDialog, { shot: pageShot }, 90000),
 			"probe",
 		);
 		if (d.error) {
@@ -160,7 +200,7 @@ export async function writeFormField(
 				expect: creating ? [] : field.form.expect(entry),
 				heading: field.form.heading,
 				mode,
-				shot,
+				shot: pageShot,
 			},
 			180000,
 		),
@@ -172,9 +212,12 @@ export async function writeFormField(
 		return 2;
 	}
 	console.log(
-		`\n  ${mode === "dry" ? "discarded" : "saved"}; dialog ${out.dialogGone ? "closed" : "STILL OPEN"}; notify network ${out.notifyNetwork}${out.stillOpen ? `\n  dialog says: ${out.stillOpen}` : ""}${out.pageClosedAfterSave ? "\n  page closed after Save (headless does this; the export decides)" : ""}\n  see ${shot}`,
+		`\n  ${mode === "dry" ? "discarded" : "saved"}; dialog ${out.dialogGone ? "closed" : "STILL OPEN"}; notify network ${out.notifyNetwork}${out.stillOpen ? `\n  dialog says: ${out.stillOpen}` : ""}${out.pageClosedAfterSave ? "\n  page closed after Save (headless does this; the export decides)" : ""}${pageShot ? `\n  see ${shot}` : ""}`,
 	);
-	if (mode !== "dry") console.log(PROVE);
+	if (!out.dialogGone) {
+		await failureShot({ mcp, shot });
+		console.log(`  screenshot: ${shot}`);
+	}
 	return out.ok && (mode === "dry" || saveClosed(out)) ? 0 : 1;
 }
 
@@ -188,7 +231,7 @@ export async function writeFormField(
  * like), and an empty one always is.
  */
 export async function writeSkills(
-	{ mcp, vanity, shot, mirror = readMirror() },
+	{ mcp, vanity, pageShot, mirror = readMirror() },
 	field,
 	{ dryRun, desiredText, allowMassRemove },
 ) {
@@ -231,7 +274,11 @@ export async function writeSkills(
 			60000,
 		);
 		const r = parseOut(
-			await mcp.runFn(addProfileSkill, { skill, dryRun, shot }, 90000),
+			await mcp.runFn(
+				addProfileSkill,
+				{ skill, dryRun, shot: pageShot },
+				90000,
+			),
 			"add skill",
 		);
 		console.log(
@@ -248,7 +295,6 @@ export async function writeSkills(
 			`\n${bad.length} add(s) did not go through, so none of the ${remove.length} delete(s) ran: a rename whose add failed would lose the skill.`,
 		);
 		console.log(`\n  needs a look: ${bad.join(", ")}`);
-		if (!dryRun) console.log(PROVE);
 		return 1;
 	}
 	for (const s of remove) {
@@ -266,7 +312,7 @@ export async function writeSkills(
 					expect: [],
 					button: "Delete skill",
 					dryRun,
-					shot,
+					shot: pageShot,
 				},
 				90000,
 			),
@@ -279,7 +325,6 @@ export async function writeSkills(
 			bad.push(s.name);
 	}
 	if (bad.length) console.log(`\n  needs a look: ${bad.join(", ")}`);
-	if (!dryRun) console.log(PROVE);
 	return bad.length ? 1 : 0;
 }
 
@@ -291,7 +336,7 @@ export async function writeSkills(
  * A bare value is the type's identity attribute (title, name, match).
  */
 export async function deleteSectionEntry(
-	{ mcp, vanity, shot, mirror = readMirror() },
+	{ mcp, vanity, shot, pageShot, mirror = readMirror() },
 	type,
 	words,
 	{ dryRun },
@@ -340,7 +385,7 @@ export async function deleteSectionEntry(
 	const out = parseOut(
 		await mcp.runFn(
 			deleteEntry,
-			{ heading, expect, button, dryRun, shot },
+			{ heading, expect, button, dryRun, shot: pageShot },
 			120000,
 		),
 		"delete",
@@ -350,13 +395,12 @@ export async function deleteSectionEntry(
 		return 2;
 	}
 	console.log(JSON.stringify(out, null, 2));
-	if (!dryRun) console.log(PROVE);
 	return (dryRun ? out.wouldClick : out.editorGone) ? 0 : 1;
 }
 
 /** Attach the block's link= to its project as a link media item. */
 export async function addLink(
-	{ mcp, vanity, shot, mirror = readMirror() },
+	{ mcp, vanity, shot, pageShot, mirror = readMirror() },
 	field,
 	{ dryRun },
 ) {
@@ -382,7 +426,7 @@ export async function addLink(
 	const out = parseOut(
 		await mcp.runFn(
 			addProjectLink,
-			{ url: field.link, title: field.linkedinTitle, dryRun, shot },
+			{ url: field.link, title: field.linkedinTitle, dryRun, shot: pageShot },
 			180000,
 		),
 		"add link",
@@ -394,7 +438,51 @@ export async function addLink(
 		return 2;
 	}
 	console.log(JSON.stringify(out, null, 2));
-	if (!dryRun) console.log(PROVE);
 	if (out.ok === false) return 1;
 	return dryRun || out.dialogGone ? 0 : 1;
+}
+
+/**
+ * Remove one media item, by its title, from a block's project:
+ *   --remove-media project.digest "GitHub repository"
+ * The mirror must show exactly one item with that title on the project.
+ */
+export async function removeMedia(
+	{ mcp, vanity, shot, pageShot, mirror = readMirror() },
+	field,
+	media,
+	{ dryRun },
+) {
+	if (!Array.isArray(mirror?.sections?.Projects) || !mirror?.entities?.projects)
+		throw new Error("projects missing from the mirror; re-export");
+	const shown = mirror.sections.Projects.find(
+		(x) => x.title === field.linkedinTitle,
+	);
+	const p = mirror.entities.projects.find(
+		(x) => x.title === field.linkedinTitle,
+	);
+	if (!shown || !p)
+		throw new Error(`"${field.linkedinTitle}" is not on LinkedIn`);
+	const hits = (shown.media ?? []).filter((m) => m.title === media);
+	if (hits.length !== 1)
+		throw new Error(
+			`${hits.length} media items titled ${JSON.stringify(media)} on "${field.linkedinTitle}" in the mirror; it has ${JSON.stringify((shown.media ?? []).map((m) => m.title))}`,
+		);
+	const target = at(vanity, `details/projects/edit/forms/${p.id}/`);
+	console.log(`Opening ${target}`);
+	await mcp.callTool("browser_navigate", { url: target }, 60000);
+	const out = parseOut(
+		await mcp.runFn(
+			removeProjectMedia,
+			{ title: field.linkedinTitle, media, dryRun, shot: pageShot },
+			120000,
+		),
+		"remove media",
+	);
+	if (out.error) {
+		console.error(`\n${out.error}\n  see: ${shot}`);
+		return 2;
+	}
+	console.log(JSON.stringify(out, null, 2));
+	return dryRun ? (out.wouldClick ? 0 : 1) : out.dialogGone ? 0 : 1;
 }

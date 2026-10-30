@@ -87,17 +87,28 @@ export async function ensureBackgroundChrome() {
 	throw new Error(`Chrome did not answer on CDP port ${CDP_PORT} within 20s`);
 }
 
+export const SETTLE_MS = Number(process.env.LINKEDIN_SETTLE_MS || 150);
+
+// `isolated`: a throwaway headless browser with an in-memory profile, never
+// the LinkedIn one; the in-page tests run against local fixtures with it.
 export function startMcp({
 	snapshots = false,
 	clientName = "linkedin-tool",
+	isolated = false,
 } = {}) {
+	const cdp = !isolated && process.env.LINKEDIN_CDP === "1";
 	const outputDir = mkdtempSync(join(tmpdir(), "linkedin-mcp-"));
 	const args = [MCP_PACKAGE, "--output-dir", outputDir];
-	if (process.env.LINKEDIN_CDP === "1")
-		args.push("--cdp-endpoint", `http://127.0.0.1:${CDP_PORT}`);
+	if (isolated) args.push("--isolated", "--headless");
+	else if (cdp) args.push("--cdp-endpoint", `http://127.0.0.1:${CDP_PORT}`);
 	else args.push("--user-data-dir", PROFILE_DIR);
 	if (!snapshots) args.push("--snapshot-mode", "none");
-	if (process.env.LINKEDIN_HEADLESS === "1" && process.env.LINKEDIN_CDP !== "1")
+	// After every run-code call the server sleeps this long, waits for the
+	// requests the call started, then sleeps it again (its default is 500ms).
+	// Each in-page function waits for its own controls, so the sleep is pure
+	// overhead; the wait for started requests (the save among them) stays.
+	args.push("--timeout-settle", String(SETTLE_MS));
+	if (process.env.LINKEDIN_HEADLESS === "1" && !cdp && !isolated)
 		args.push("--headless");
 	const mcp = spawn("npx", args, { stdio: ["pipe", "pipe", "pipe"] });
 
@@ -128,6 +139,17 @@ export function startMcp({
 
 	let nextId = 0;
 	const pending = new Map();
+	// A server that dies would otherwise leave every pending call to its own
+	// timeout (a minute or more each); fail them now, and every later one too.
+	let exited = null;
+	mcp.on("exit", (code, signal) => {
+		exited = `the MCP server exited (${signal ?? code})`;
+		for (const [id, { reject, timer }] of pending) {
+			clearTimeout(timer);
+			pending.delete(id);
+			reject(new Error(exited));
+		}
+	});
 	createInterface({ input: mcp.stdout }).on("line", (line) => {
 		let msg;
 		try {
@@ -152,6 +174,7 @@ export function startMcp({
 
 	function send(method, params, timeoutMs = 30000) {
 		return new Promise((resolve, reject) => {
+			if (exited) return reject(new Error(exited));
 			const id = ++nextId;
 			const timer = setTimeout(() => {
 				pending.delete(id);
@@ -171,7 +194,7 @@ export function startMcp({
 		// Attached over CDP the browser is shared and long-lived; closing it would
 		// close the default context and with it the LinkedIn session (that is how
 		// a fresh login evaporated on 2026-09-12). Disconnecting is enough.
-		if (name === "browser_close" && process.env.LINKEDIN_CDP === "1")
+		if (name === "browser_close" && cdp)
 			return {
 				content: [
 					{ type: "text", text: "detached; shared Chrome left running" },
@@ -212,7 +235,7 @@ export function startMcp({
 	}
 
 	async function init() {
-		if (process.env.LINKEDIN_CDP === "1")
+		if (cdp)
 			console.error(`  background Chrome: ${await ensureBackgroundChrome()}`);
 		await send(
 			"initialize",
@@ -264,9 +287,9 @@ export function startMcp({
 		);
 	}
 
-	async function evaluate(fn) {
+	async function evaluate(fn, timeoutMs = 30000) {
 		let text = extractEvalResult(
-			await callTool("browser_evaluate", { function: fn }),
+			await callTool("browser_evaluate", { function: fn }, timeoutMs),
 		);
 		if (text.startsWith('"')) {
 			try {
@@ -302,26 +325,52 @@ export function startMcp({
 		return false;
 	}
 
+	// The member /voyager/api/me answered for in this session, if it did.
+	let me = null;
+
 	// The vanity (publicIdentifier) of whoever this session is logged in as.
 	// /voyager/api/me returns it, so no tool ever needs the vanity configured.
+	// The call needs only a linkedin.com document to run from: robots.txt is a
+	// few bytes, where the feed is the heaviest page on the site. The feed
+	// stays as the fallback.
 	async function getVanity() {
-		await callTool(
-			"browser_navigate",
-			{ url: "https://www.linkedin.com/feed/" },
-			60000,
+		let r = {};
+		for (const url of [
+			"https://www.linkedin.com/robots.txt",
+			"https://www.linkedin.com/feed/",
+		]) {
+			await callTool("browser_navigate", { url }, 60000);
+			try {
+				r = JSON.parse(await runFn(readVanity, {}, 40000));
+			} catch {
+				r = {};
+			}
+			if (r.vanity) {
+				me = r.vanity;
+				return r.vanity;
+			}
+		}
+		throw new Error(
+			`could not read your vanity name from the session (status ${r.status}). Import your Chrome session first: node src/session-import.mjs`,
 		);
-		const raw = await runFn(readVanity, {}, 40000);
-		const r = JSON.parse(raw);
-		if (!r.vanity)
-			throw new Error(
-				`could not read your vanity name from the session (status ${r.status}). Import your Chrome session first: node src/session-import.mjs`,
-			);
-		return r.vanity;
+	}
+
+	/** Whether the browser still answers: a cheap call, for a batch to check after a failure. */
+	async function alive() {
+		try {
+			await evaluate("() => 1", 10000);
+			return true;
+		} catch {
+			return false;
+		}
 	}
 
 	// Confirm the session is authenticated for `vanity`. Never logs in; on a miss
 	// it points you at the session import.
 	async function ensureLoggedIn(vanity) {
+		// /voyager/api/me already answered as this member: only a live session
+		// gets that, so the profile page has nothing to add.
+		if (me && me === vanity) return;
 		await callTool(
 			"browser_navigate",
 			{ url: `https://www.linkedin.com/in/${vanity}/` },
@@ -341,6 +390,7 @@ export function startMcp({
 		evaluate,
 		ensureLoggedIn,
 		getVanity,
+		alive,
 		close,
 	};
 }

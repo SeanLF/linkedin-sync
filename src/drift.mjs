@@ -107,6 +107,37 @@ export function compareAll(f, profile, blocks) {
 	return [main, ...facets];
 }
 
+// Facets `write <id>` does not write: a project's link goes on with
+// `write --add-link`, and media health is LinkedIn's preview, not a value.
+export const UNWRITTEN_FACETS = new Set(["link", "media"]);
+
+/**
+ * What `write --all-drift` writes: every block whose main value or a facet
+ * `write <id>` handles is stale (drift or absent). `unwritten` names the stale
+ * facets it leaves to another command; `unreadable` the blocks whose read
+ * threw, which make the whole list suspect (the caller refuses on any).
+ */
+export function staleFields(fields, profile, blocks) {
+	const stale = [];
+	const unwritten = [];
+	const unreadable = [];
+	for (const f of fields) {
+		const results = compareAll(f, profile, blocks);
+		if (results.some((r) => r.verdict === VERDICTS.UNREADABLE)) {
+			unreadable.push(f.id);
+			continue;
+		}
+		const off = results.filter(
+			(r) => r.verdict === VERDICTS.DRIFT || r.verdict === VERDICTS.ABSENT,
+		);
+		const writable = (r) =>
+			r.id === f.id || !UNWRITTEN_FACETS.has(r.id.slice(f.id.length + 1));
+		if (off.some(writable)) stale.push(f.id);
+		for (const r of off) if (!writable(r)) unwritten.push(r.id);
+	}
+	return { stale, unwritten, unreadable };
+}
+
 /**
  * url -> HTTP status (or an error string) for every link on a compared
  * project. HEAD first; some hosts refuse HEAD, so a 403/405 is retried as GET.
@@ -274,12 +305,72 @@ function selfTest() {
 		);
 	}
 	failed += sectionSelfTest();
+	failed += staleSelfTest();
 	console.log(
 		failed
 			? `\n${failed} self-test failure(s)`
 			: "\nself-test: comparator produces every verdict, position reads pick one role or refuse, and every section type reads unreadable when its data is missing",
 	);
 	return failed ? EXIT.broken : EXIT.clean;
+}
+
+// What `write --all-drift` picks: stale main values and the facets the field
+// writer handles; not a link or media facet, and never a block it cannot read.
+function staleSelfTest() {
+	const same = () => "same";
+	const fields = [
+		{ id: "headline", read: (p) => p.headline },
+		{ id: "about", read: same },
+		{
+			id: "project.link-only",
+			read: same,
+			facets: [
+				{ id: "project.link-only.link", read: () => "a", desired: "b" },
+				{
+					id: "project.link-only.media",
+					read: () => "bad",
+					desired: "ok",
+					optional: true,
+				},
+			],
+		},
+		{
+			id: "project.dates",
+			read: same,
+			facets: [{ id: "project.dates.dates", read: () => "x", desired: "y" }],
+		},
+		{
+			id: "education.broken",
+			read: () => {
+				throw new Error("Education missing");
+			},
+		},
+		{ id: "education.new", read: () => undefined },
+	];
+	const blocks = new Map(
+		fields.map((f) => [
+			f.id,
+			{
+				text:
+					f.id === "headline" ? "new" : f.id === "education.new" ? "x" : "same",
+			},
+		]),
+	);
+	const got = staleFields(fields, { headline: "old" }, blocks);
+	const want = {
+		stale: ["headline", "project.dates", "education.new"],
+		unwritten: ["project.link-only.link", "project.link-only.media"],
+		unreadable: ["education.broken"],
+	};
+	let failed = 0;
+	for (const k of Object.keys(want)) {
+		const ok = JSON.stringify(got[k]) === JSON.stringify(want[k]);
+		if (!ok) failed++;
+		console.log(
+			`${ok ? "ok  " : "FAIL"}  --all-drift ${k.padEnd(16)} expected ${JSON.stringify(want[k])}, got ${JSON.stringify(got[k])}`,
+		);
+	}
+	return failed;
 }
 
 // The section types read through the schema against a fixture shaped like a

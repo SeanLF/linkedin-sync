@@ -16,9 +16,9 @@
 // Engineer" from hitting "Senior Software Engineer".
 export const openPosition = async (page, { match, shot, role }) => {
 	page.setDefaultTimeout(8000);
-	await page
-		.waitForLoadState("networkidle", { timeout: 15000 })
-		.catch(() => {});
+	// Not networkidle: LinkedIn never goes idle, so that wait always ran its
+	// full 15s. Wait for the thing this needs instead: an edit control, or a
+	// row naming the company.
 	try {
 		// 1. the edit control names the role and company in its aria-label
 		let edit = role
@@ -38,10 +38,15 @@ export const openPosition = async (page, { match, shot, role }) => {
 						)
 						.join(", "),
 				);
-		if (role)
+		await (role ? edit : edit.or(page.locator("li").filter({ hasText: match })))
+			.first()
+			.waitFor({ state: "attached", timeout: 15000 })
+			.catch(() => {});
+		// A row can render a beat before its edit control.
+		if (!role && !(await edit.count()))
 			await edit
 				.first()
-				.waitFor({ state: "attached", timeout: 15000 })
+				.waitFor({ state: "attached", timeout: 2000 })
 				.catch(() => {});
 		if (!(await edit.count()) && role)
 			throw new Error(`no edit control labelled "Edit ${role} at ${match}"`);
@@ -66,7 +71,7 @@ export const openPosition = async (page, { match, shot, role }) => {
 		await edit.click();
 		return JSON.stringify({ clicked: label });
 	} catch (e) {
-		await page.screenshot({ path: shot }).catch(() => {});
+		if (shot) await page.screenshot({ path: shot }).catch(() => {});
 		const lis = await page
 			.locator("li")
 			.count()
@@ -83,9 +88,6 @@ export const openPosition = async (page, { match, shot, role }) => {
 // docs/lessons), a plain navigate did not.
 export const findProjectEditor = async (page, { title, shot }) => {
 	page.setDefaultTimeout(8000);
-	await page
-		.waitForLoadState("networkidle", { timeout: 15000 })
-		.catch(() => {});
 	const label = `Edit project ${title}`;
 	const edit = page.locator(
 		`a[aria-label=${JSON.stringify(label)}], button[aria-label=${JSON.stringify(label)}]`,
@@ -95,6 +97,11 @@ export const findProjectEditor = async (page, { title, shot }) => {
 		// into view inside <main>, which is the scroller; window.scrollTo does
 		// nothing here (probe 2026-09-12). Scroll the last edit link, then wheel.
 		const all = page.locator('a[aria-label^="Edit project"]');
+		// The first rows, not networkidle (which LinkedIn never reaches).
+		await all
+			.first()
+			.waitFor({ state: "attached", timeout: 15000 })
+			.catch(() => {});
 		let seen = -1;
 		for (let i = 0; i < 12 && !(await edit.count()); i++) {
 			const n = await all.count();
@@ -105,7 +112,14 @@ export const findProjectEditor = async (page, { title, shot }) => {
 				.scrollIntoViewIfNeeded()
 				.catch(() => {});
 			await page.mouse.wheel(0, 4000);
-			await page.waitForTimeout(1200);
+			// Until more rows arrive (or the one wanted), not a fixed pause.
+			const end = Date.now() + 2500;
+			while (
+				Date.now() < end &&
+				(await all.count()) === n &&
+				!(await edit.count())
+			)
+				await page.waitForTimeout(150);
 		}
 		const nEdit = await edit.count();
 		if (nEdit === 0)
@@ -127,7 +141,7 @@ export const findProjectEditor = async (page, { title, shot }) => {
 			href: href.startsWith("http") ? href : `https://www.linkedin.com${href}`,
 		});
 	} catch (e) {
-		await page.screenshot({ path: shot }).catch(() => {});
+		if (shot) await page.screenshot({ path: shot }).catch(() => {});
 		const labels = await page
 			.locator('a[aria-label^="Edit project"]')
 			.evaluateAll((els) => els.map((e) => e.getAttribute("aria-label")));
@@ -142,7 +156,6 @@ export const findProjectEditor = async (page, { title, shot }) => {
 // looped over every skill crashed the headless CDP Chrome (2026-09-12).
 export const addSkill = async (page, { skill, dryRun }) => {
 	page.setDefaultTimeout(12000);
-	await page.waitForTimeout(1200);
 	const dialog = page.getByRole("dialog").first();
 	await dialog.waitFor({ state: "visible", timeout: 15000 });
 	// Already a chip? Then it is present; nothing to do.
@@ -240,14 +253,15 @@ export const addSkill = async (page, { skill, dryRun }) => {
 // asked for. A dry run stops at the confirmation, reports it, and cancels.
 export const deleteProject = async (page, { title: wanted, dryRun, shot }) => {
 	page.setDefaultTimeout(5000);
-	await page.waitForTimeout(1000);
 	const editor = page.getByRole("dialog").first();
 	await editor.waitFor({ state: "visible", timeout: 15000 });
-	const title = await editor
-		.getByLabel("Project name")
-		.first()
-		.inputValue()
-		.catch(() => null);
+	const titleBox = editor.getByLabel("Project name").first();
+	// The name box can render before its value does; wait for the value.
+	let title = null;
+	for (const end = Date.now() + 3000; ; await page.waitForTimeout(100)) {
+		title = await titleBox.inputValue({ timeout: 1000 }).catch(() => null);
+		if (title === wanted || Date.now() > end) break;
+	}
 	if (title !== wanted)
 		return JSON.stringify({
 			error: `editor is for ${JSON.stringify(title)}, not the requested project; not deleting`,
@@ -258,7 +272,15 @@ export const deleteProject = async (page, { title: wanted, dryRun, shot }) => {
 			error: `expected one "Delete project" button, found ${await del.count()}`,
 		});
 	await del.click();
-	await page.waitForTimeout(1200);
+	// The confirmation, not a fixed pause: its visible "Delete" (or, if it
+	// never comes, the same report a pause would have produced).
+	await page
+		.getByRole("dialog")
+		.getByRole("button", { name: /^delete$/i })
+		.filter({ visible: true })
+		.first()
+		.waitFor({ state: "visible", timeout: 6000 })
+		.catch(() => {});
 	const confirm = page.getByRole("dialog").last();
 	// No confirmation dialog of its own means the press may
 	// have deleted outright, so nothing more is clicked.
@@ -269,7 +291,7 @@ export const deleteProject = async (page, { title: wanted, dryRun, shot }) => {
 			.count()
 			.catch(() => 0));
 	if (!confirmShown) {
-		await page.screenshot({ path: shot }).catch(() => {});
+		if (shot) await page.screenshot({ path: shot }).catch(() => {});
 		return JSON.stringify({
 			error:
 				'no confirmation dialog appeared after "Delete project"; the press may have deleted outright, so nothing more was clicked. Re-export before anything else.',
@@ -328,8 +350,7 @@ export const deleteProject = async (page, { title: wanted, dryRun, shot }) => {
 	);
 	let after = null;
 	try {
-		await page.waitForTimeout(1500);
-		await page.screenshot({ path: shot });
+		if (shot) await page.screenshot({ path: shot });
 		after = page.url();
 	} catch {
 		after =
@@ -367,14 +388,43 @@ export const describeDialog = async (page, { shot }) => {
 	// page down with "Target page, context or browser has been closed"
 	// (bisected 2026-09-12; the same page answered a count() a moment earlier).
 	// The dialog wait below is the readiness check that matters.
-	await page.waitForTimeout(1000);
+	const SEL =
+		'input:not([type=hidden]), textarea, select, [contenteditable="true"], [role="textbox"]';
 	const dialog = page.getByRole("dialog").first();
 	try {
 		await dialog.waitFor({ state: "visible", timeout: 15000 });
 	} catch (e) {
-		await page.screenshot({ path: shot, fullPage: false }).catch(() => {});
+		if (shot)
+			await page.screenshot({ path: shot, fullPage: false }).catch(() => {});
 		return diag(`no dialog: ${e.message.split("\n")[0]}`);
 	}
+	// Then until its controls and their values stop changing (two quiet reads
+	// 120ms apart), capped at 3s: what the fixed pauses here used to stand in for.
+	const settle = async () => {
+		const sig = () =>
+			dialog
+				.evaluate((d, sel) => {
+					const els = [...d.querySelectorAll(sel)];
+					return `${els.length}:${els.map((e) => (e.value ?? e.textContent ?? "").length).join(",")}`;
+				}, SEL)
+				.catch(() => "");
+		let last = await sig();
+		let quiet = 0;
+		for (const end = Date.now() + 3000; quiet < 2 && Date.now() < end; ) {
+			await page.waitForTimeout(120);
+			const now = await sig();
+			quiet = now === last ? quiet + 1 : 0;
+			last = now;
+		}
+	};
+	// A dialog can open as a shell and fill a moment later: wait for a control
+	// in it (a dialog with none is reported as such below, not as missing).
+	await dialog
+		.locator(SEL)
+		.first()
+		.waitFor({ state: "attached" })
+		.catch(() => {});
+	await settle();
 	const heading = await dialog
 		.getByRole("heading")
 		.first()
@@ -387,16 +437,20 @@ export const describeDialog = async (page, { shot }) => {
 					el.scrollTop = el.scrollHeight;
 		})
 		.catch(() => {});
-	await page.waitForTimeout(300);
-	await page.screenshot({ path: shot, fullPage: false }).catch(() => {});
+	await settle();
+	if (shot)
+		await page.screenshot({ path: shot, fullPage: false }).catch(() => {});
 	const controls = [];
-	const SEL =
-		'input:not([type=hidden]), textarea, select, [contenteditable="true"], [role="textbox"]';
-	const text = (loc) =>
-		loc
-			.first()
-			.textContent({ timeout: 800 })
-			.catch(() => null);
+	// Only wait on a label that exists. textContent on a locator that matches
+	// nothing sits out its whole timeout, and most controls here have no
+	// label[for] or sibling label: that was 0.8s per miss, several per control.
+	const text = async (loc) =>
+		(await loc.count().catch(() => 0))
+			? loc
+					.first()
+					.textContent({ timeout: 800 })
+					.catch(() => null)
+			: null;
 	for (const loc of await dialog.locator(SEL).all()) {
 		const id = await loc.getAttribute("id");
 		let label = id ? await text(page.locator(`label[for="${id}"]`)) : null;
@@ -589,7 +643,6 @@ export const fillDialog = async (
 				error: `the editor's date controls are not the expected shape (${e.message.split("\n")[0]}); not saving`,
 			});
 		}
-		await page.waitForTimeout(200);
 	} else if (dates && mode !== "noop") {
 		// Probe 2026-09-12: two Month/Year select pairs (start, then end) and one
 		// checkbox, "I am currently working on this project", which hides the end
@@ -642,37 +695,6 @@ export const fillDialog = async (
 			await months.nth(1).selectOption({ label: monthNames[Number(em) - 1] });
 			await years.nth(1).selectOption({ label: ey });
 		}
-		await page.waitForTimeout(200);
-	}
-	await page.waitForTimeout(400);
-	const after = await read();
-	let datesBack = null;
-	if (datesWanted) {
-		const opt = async (src) =>
-			dialog
-				.getByLabel(new RegExp(src, "i"))
-				.first()
-				.evaluate((e) => e.options[e.selectedIndex]?.text ?? "");
-		datesBack = {
-			start: `${await opt(dateLabels.startMonth)} ${await opt(dateLabels.startYear)}`,
-			current: await dialog
-				.getByLabel(new RegExp(dateLabels.current, "i"))
-				.first()
-				.isChecked(),
-		};
-		if (!datesBack.current)
-			datesBack.end = `${await opt(dateLabels.endMonth)} ${await opt(dateLabels.endYear)}`;
-	} else if (dates && mode !== "noop") {
-		const months = dialog.getByLabel("Month", { exact: true });
-		const years = dialog.getByLabel("Year", { exact: true });
-		const opt = async (sel) =>
-			sel.evaluate((e) => e.options[e.selectedIndex]?.text ?? "");
-		datesBack = {
-			start: `${await opt(months.nth(0))} ${await opt(years.nth(0))}`,
-			current: await dialog.getByRole("checkbox").first().isChecked(),
-		};
-		if ((await months.count()) > 1)
-			datesBack.end = `${await opt(months.nth(1))} ${await opt(years.nth(1))}`;
 	}
 	// innerText renders each editor block with its own newline count, so a
 	// paragraph break can read back as three or five newlines. The gate here
@@ -685,18 +707,65 @@ export const fillDialog = async (
 			.replace(/[ \t]+$/gm, "")
 			.replace(/\n+/g, "\n")
 			.trim();
+	const readBack = async () => {
+		const after = await read();
+		let datesBack = null;
+		if (datesWanted) {
+			const opt = async (src) =>
+				dialog
+					.getByLabel(new RegExp(src, "i"))
+					.first()
+					.evaluate((e) => e.options[e.selectedIndex]?.text ?? "");
+			datesBack = {
+				start: `${await opt(dateLabels.startMonth)} ${await opt(dateLabels.startYear)}`,
+				current: await dialog
+					.getByLabel(new RegExp(dateLabels.current, "i"))
+					.first()
+					.isChecked(),
+			};
+			if (!datesBack.current)
+				datesBack.end = `${await opt(dateLabels.endMonth)} ${await opt(dateLabels.endYear)}`;
+		} else if (dates && mode !== "noop") {
+			const months = dialog.getByLabel("Month", { exact: true });
+			const years = dialog.getByLabel("Year", { exact: true });
+			const opt = async (sel) =>
+				sel.evaluate((e) => e.options[e.selectedIndex]?.text ?? "");
+			datesBack = {
+				start: `${await opt(months.nth(0))} ${await opt(years.nth(0))}`,
+				current: await dialog.getByRole("checkbox").first().isChecked(),
+			};
+			if ((await months.count()) > 1)
+				datesBack.end = `${await opt(months.nth(1))} ${await opt(years.nth(1))}`;
+		}
+		const extraBack = [];
+		for (const x of mode === "noop" ? [] : (extra ?? []))
+			extraBack.push({
+				pattern: x.pattern,
+				want: x.value,
+				got: await dialog
+					.getByLabel(new RegExp(x.pattern, "i"))
+					.inputValue()
+					.catch(() => null),
+			});
+		return { after, datesBack, extraBack };
+	};
+	// Read every control back until it all reads as wanted, or 2.5s pass: the
+	// editor applies an input on its own schedule. This replaces fixed pauses
+	// (0.2s after dates, 0.4s before reading) with a wait that ends as soon as
+	// the check it guards passes, and still fails it when it does not.
+	let back;
+	for (const end = Date.now() + 2500; ; await page.waitForTimeout(100)) {
+		back = await readBack();
+		const ok =
+			norm(back.after) === norm(text) &&
+			(!datesWanted ||
+				JSON.stringify(back.datesBack) === JSON.stringify(datesWanted)) &&
+			back.extraBack.every((x) => x.got === x.want);
+		if (ok || Date.now() > end) break;
+	}
+	const { after, datesBack, extraBack } = back;
 	const matches = norm(after) === norm(text);
-	const extraBack = [];
-	for (const x of mode === "noop" ? [] : (extra ?? []))
-		extraBack.push({
-			pattern: x.pattern,
-			want: x.value,
-			got: await dialog
-				.getByLabel(new RegExp(x.pattern, "i"))
-				.inputValue()
-				.catch(() => null),
-		});
-	await page.screenshot({ path: shot }).catch(() => {});
+	if (shot) await page.screenshot({ path: shot }).catch(() => {});
 	const result = {
 		mode,
 		beforeLength: before.length,
@@ -717,9 +786,21 @@ export const fillDialog = async (
 			.getByRole("button", { name: /^(Dismiss|Close)$/ })
 			.first()
 			.click();
+		// isVisible does not wait (its timeout is ignored), so a prompt that
+		// rendered a beat late went unanswered. Wait for whichever comes first:
+		// the "Discard" prompt, or the editor closing without one.
 		const discard = page.getByRole("button", { name: /discard/i }).first();
-		if (await discard.isVisible({ timeout: 2500 }).catch(() => false))
-			await discard.click();
+		const next = await Promise.race([
+			discard.waitFor({ state: "visible", timeout: 2500 }).then(
+				() => "asks",
+				() => null,
+			),
+			dialog.waitFor({ state: "hidden", timeout: 2500 }).then(
+				() => "closed",
+				() => null,
+			),
+		]);
+		if (next === "asks") await discard.click();
 		result.dialogGone = await dialog
 			.waitFor({ state: "hidden", timeout: 10000 })
 			.then(
@@ -779,19 +860,14 @@ export const fillDialog = async (
 			() => false,
 		);
 	try {
-		await page.waitForTimeout(1500);
-		await page.screenshot({ path: shot });
+		// No settling pause: the MCP tool waits for the requests this call
+		// started (the save among them) before it returns.
+		if (shot) await page.screenshot({ path: shot });
 		result.url = page.url();
 	} catch (e) {
 		result.pageClosedAfterSave = e.message.split("\n")[0];
 	}
 	return JSON.stringify(result);
-};
-
-// How many dialogs are open after a navigation settles.
-export const countDialogs = async (page) => {
-	await page.waitForTimeout(2500);
-	return String(await page.getByRole("dialog").count());
 };
 
 // LINKEDIN_TRACE: where an editor navigation landed.
@@ -845,10 +921,18 @@ export const fillForm = async (
 	try {
 		await dialog.waitFor({ state: "visible", timeout: 15000 });
 	} catch {
-		await page.screenshot({ path: shot }).catch(() => {});
+		if (shot) await page.screenshot({ path: shot }).catch(() => {});
 		return JSON.stringify({ error: `no editor opened at ${page.url()}` });
 	}
-	await page.waitForTimeout(800);
+	// The heading this editor should carry, then (below) its identity values,
+	// instead of a fixed 0.8s: each wait ends when what it guards is there.
+	if (heading)
+		await dialog
+			.getByRole("heading")
+			.filter({ hasText: new RegExp(heading, "i") })
+			.first()
+			.waitFor({ state: "attached", timeout: 5000 })
+			.catch(() => {});
 	const head = (
 		(await dialog
 			.getByRole("heading")
@@ -883,20 +967,34 @@ export const fillForm = async (
 			: loc.inputValue();
 	};
 	for (const ex of expect ?? []) {
+		await at(ex)
+			.waitFor({ state: "attached", timeout: 3000 })
+			.catch(() => {});
 		if (!(await all(ex).count()))
 			return JSON.stringify({
 				error: `no control ${name(ex)} to check which entry this is; not touching it`,
 			});
-		const v = await readStep({ ...ex, kind: "text" });
+		// An editor can show its controls before their saved values: give the
+		// identity value up to 3s to arrive before calling it the wrong entry.
+		let v;
+		for (const end = Date.now() + 3000; ; await page.waitForTimeout(100)) {
+			v = await readStep({ ...ex, kind: "text" });
+			if (norm(v) === norm(ex.value) || Date.now() > end) break;
+		}
 		if (norm(v) !== norm(ex.value))
 			return JSON.stringify({
 				error: `this editor's ${name(ex)} reads ${JSON.stringify(v)}, not ${JSON.stringify(ex.value)}: the wrong entry; not touching it`,
 			});
 	}
 	for (const st of steps) {
+		// A control an earlier step reveals (an end date under an unticked
+		// "current" box) gets up to 2s to render; there is no pause otherwise.
+		await at(st)
+			.waitFor({ state: "attached", timeout: 2000 })
+			.catch(() => {});
 		const n = await all(st).count();
 		if (n <= (st.nth ?? 0)) {
-			await page.screenshot({ path: shot }).catch(() => {});
+			if (shot) await page.screenshot({ path: shot }).catch(() => {});
 			return JSON.stringify({
 				error: `no control ${name(st)} in this editor (found ${n}); it changed shape, not saving`,
 			});
@@ -929,35 +1027,43 @@ export const fillForm = async (
 		} else {
 			await loc.fill(st.value);
 		}
-		await page.waitForTimeout(250);
 	}
-	await page.waitForTimeout(600);
-	const results = [];
-	for (const st of steps) {
-		let got;
-		try {
-			got = await readStep(st);
-		} catch (e) {
-			got = `unreadable: ${e.message.split("\n")[0]}`;
+	// Read every control back until all of them read as the record, or 2.5s
+	// pass (it was a fixed 0.25s per step and 0.6s more).
+	const readAll = async () => {
+		const results = [];
+		for (const st of steps) {
+			let got;
+			try {
+				got = await readStep(st);
+			} catch (e) {
+				got = `unreadable: ${e.message.split("\n")[0]}`;
+			}
+			let ok;
+			let shown = got;
+			if (st.kind === "select") {
+				shown = got?.text;
+				ok = st.option === "" ? got?.index === 0 : got?.text === st.option;
+			} else if (st.kind === "checkbox") ok = got === st.value;
+			else ok = norm(got) === norm(st.value);
+			results.push({
+				control: name(st),
+				want:
+					st.kind === "select"
+						? st.option || "(blank)"
+						: String(st.value).slice(0, 80),
+				got: String(shown).slice(0, 80),
+				ok,
+			});
 		}
-		let ok;
-		let shown = got;
-		if (st.kind === "select") {
-			shown = got?.text;
-			ok = st.option === "" ? got?.index === 0 : got?.text === st.option;
-		} else if (st.kind === "checkbox") ok = got === st.value;
-		else ok = norm(got) === norm(st.value);
-		results.push({
-			control: name(st),
-			want:
-				st.kind === "select"
-					? st.option || "(blank)"
-					: String(st.value).slice(0, 80),
-			got: String(shown).slice(0, 80),
-			ok,
-		});
+		return results;
+	};
+	let results;
+	for (const end = Date.now() + 2500; ; await page.waitForTimeout(100)) {
+		results = await readAll();
+		if (results.every((r) => r.ok) || Date.now() > end) break;
 	}
-	await page.screenshot({ path: shot }).catch(() => {});
+	if (shot) await page.screenshot({ path: shot }).catch(() => {});
 	const out = {
 		mode,
 		heading: head,
@@ -984,9 +1090,21 @@ export const fillForm = async (
 			.getByRole("button", { name: /^(Dismiss|Close)$/ })
 			.first()
 			.click();
+		// isVisible does not wait (its timeout is ignored), so a prompt that
+		// rendered a beat late went unanswered. Wait for whichever comes first:
+		// the "Discard" prompt, or the editor closing without one.
 		const discard = page.getByRole("button", { name: /discard/i }).first();
-		if (await discard.isVisible({ timeout: 2500 }).catch(() => false))
-			await discard.click();
+		const next = await Promise.race([
+			discard.waitFor({ state: "visible", timeout: 2500 }).then(
+				() => "asks",
+				() => null,
+			),
+			dialog.waitFor({ state: "hidden", timeout: 2500 }).then(
+				() => "closed",
+				() => null,
+			),
+		]);
+		if (next === "asks") await discard.click();
 		out.dialogGone = await dialog
 			.waitFor({ state: "hidden", timeout: 10000 })
 			.then(
@@ -1016,8 +1134,7 @@ export const fillForm = async (
 			() => false,
 		);
 	try {
-		await page.waitForTimeout(1500);
-		await page.screenshot({ path: shot });
+		if (shot) await page.screenshot({ path: shot });
 		out.url = page.url();
 		if (!out.dialogGone)
 			out.stillOpen = (await dialog.innerText().catch(() => ""))
@@ -1041,10 +1158,17 @@ export const deleteEntry = async (
 	try {
 		await editor.waitFor({ state: "visible", timeout: 15000 });
 	} catch {
-		await page.screenshot({ path: shot }).catch(() => {});
+		if (shot) await page.screenshot({ path: shot }).catch(() => {});
 		return JSON.stringify({ error: `no editor opened at ${page.url()}` });
 	}
-	await page.waitForTimeout(800);
+	// The heading and identity values, not a fixed 0.8s.
+	if (heading)
+		await editor
+			.getByRole("heading")
+			.filter({ hasText: new RegExp(heading, "i") })
+			.first()
+			.waitFor({ state: "attached", timeout: 5000 })
+			.catch(() => {});
 	const head = (
 		(await editor
 			.getByRole("heading")
@@ -1058,7 +1182,12 @@ export const deleteEntry = async (
 		});
 	for (const ex of expect ?? []) {
 		const loc = editor.getByLabel(new RegExp(ex.pattern, "i")).first();
-		const v = await loc.inputValue().catch(() => null);
+		let v;
+		for (const end = Date.now() + 3000; ; await page.waitForTimeout(100)) {
+			v = await loc.inputValue({ timeout: 1000 }).catch(() => null);
+			if ((v ?? "").trim() === (ex.value ?? "").trim() || Date.now() > end)
+				break;
+		}
 		if ((v ?? "").trim() !== (ex.value ?? "").trim())
 			return JSON.stringify({
 				error: `this editor's /${ex.pattern}/ reads ${JSON.stringify(v)}, not ${JSON.stringify(ex.value)}; not deleting`,
@@ -1070,7 +1199,15 @@ export const deleteEntry = async (
 			error: `expected one "${button}" button, found ${await del.count()}`,
 		});
 	await del.click();
-	await page.waitForTimeout(1200);
+	// The confirmation, not a fixed pause: its visible "Delete" (or, if it
+	// never comes, the same report a pause would have produced).
+	await page
+		.getByRole("dialog")
+		.getByRole("button", { name: /^delete$/i })
+		.filter({ visible: true })
+		.first()
+		.waitFor({ state: "visible", timeout: 6000 })
+		.catch(() => {});
 	const confirm = page.getByRole("dialog").last();
 	// The confirmation is a dialog of its own: the last one, and not the editor
 	// (which still carries the entry's delete button). Without one, the press
@@ -1082,7 +1219,7 @@ export const deleteEntry = async (
 			.count()
 			.catch(() => 0));
 	if (!confirmShown) {
-		await page.screenshot({ path: shot }).catch(() => {});
+		if (shot) await page.screenshot({ path: shot }).catch(() => {});
 		return JSON.stringify({
 			error: `no confirmation dialog appeared after "${button}"; the press may have deleted outright, so nothing more was clicked. Re-export before anything else.`,
 		});
@@ -1141,8 +1278,7 @@ export const deleteEntry = async (
 	);
 	let after = null;
 	try {
-		await page.waitForTimeout(1500);
-		await page.screenshot({ path: shot });
+		if (shot) await page.screenshot({ path: shot });
 		after = page.url();
 	} catch {
 		after =
@@ -1164,8 +1300,8 @@ export const addProfileSkill = async (page, { skill, dryRun, shot }) => {
 	page.setDefaultTimeout(10000);
 	const dialog = page.getByRole("dialog").first();
 	await dialog.waitFor({ state: "visible", timeout: 15000 });
-	await page.waitForTimeout(800);
 	const box = dialog.getByLabel(/^Skill\*?$/i).first();
+	await box.waitFor({ state: "visible", timeout: 5000 }).catch(() => {});
 	if (!(await box.count())) return JSON.stringify({ skill, state: "no-input" });
 	await box.click();
 	// Typed key by key, this typeahead drops keystrokes while it re-renders:
@@ -1174,36 +1310,54 @@ export const addProfileSkill = async (page, { skill, dryRun, shot }) => {
 	// box holds the whole name before reading any suggestion.
 	await box.fill(skill.slice(0, -1));
 	await box.pressSequentially(skill.slice(-1), { delay: 100 });
-	await page.waitForTimeout(2500);
-	const typed = await box.inputValue().catch(() => "");
-	if (typed !== skill) {
-		await page.screenshot({ path: shot }).catch(() => {});
-		return JSON.stringify({ skill, state: "typed-wrong", typed });
-	}
 	const escaped = skill.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 	const exact = new RegExp(`^\\s*${escaped}\\s*$`, "i");
 	const result = page
 		.locator('[role="option"]')
 		.filter({ hasText: exact })
 		.first();
+	// Until the exact suggestion shows, up to 4s (it was a fixed 2.5s).
+	await result.waitFor({ state: "visible", timeout: 4000 }).catch(() => {});
+	const typed = await box.inputValue().catch(() => "");
+	if (typed !== skill) {
+		if (shot) await page.screenshot({ path: shot }).catch(() => {});
+		return JSON.stringify({ skill, state: "typed-wrong", typed });
+	}
 	if (!(await result.count())) {
 		const seen = await page
 			.locator('[role="option"]')
 			.evaluateAll((els) => els.map((e) => e.textContent.trim()).slice(0, 10));
-		await page.screenshot({ path: shot }).catch(() => {});
+		if (shot) await page.screenshot({ path: shot }).catch(() => {});
 		const close = dialog.getByRole("button", { name: /^(Dismiss|Close)$/ });
 		await close
 			.first()
 			.click()
 			.catch(() => {});
+		// isVisible does not wait (its timeout is ignored), so a prompt that
+		// rendered a beat late went unanswered. Wait for whichever comes first:
+		// the "Discard" prompt, or the editor closing without one.
 		const discard = page.getByRole("button", { name: /discard/i }).first();
-		if (await discard.isVisible({ timeout: 2500 }).catch(() => false))
-			await discard.click();
+		const next = await Promise.race([
+			discard.waitFor({ state: "visible", timeout: 2500 }).then(
+				() => "asks",
+				() => null,
+			),
+			dialog.waitFor({ state: "hidden", timeout: 2500 }).then(
+				() => "closed",
+				() => null,
+			),
+		]);
+		if (next === "asks") await discard.click();
 		return JSON.stringify({ skill, state: "no-exact-suggestion", seen });
 	}
 	await result.click();
-	await page.waitForTimeout(1000);
-	const value = await box.inputValue().catch(() => "");
+	// Until the box holds the picked name, up to 2s (was a fixed 1s).
+	let value = "";
+	for (const end = Date.now() + 2000; ; await page.waitForTimeout(100)) {
+		value = await box.inputValue().catch(() => "");
+		if (value.trim().toLowerCase() === skill.toLowerCase() || Date.now() > end)
+			break;
+	}
 	const picked = value.trim().toLowerCase() === skill.toLowerCase();
 	if (dryRun || !picked) {
 		await dialog
@@ -1211,9 +1365,21 @@ export const addProfileSkill = async (page, { skill, dryRun, shot }) => {
 			.first()
 			.click()
 			.catch(() => {});
+		// isVisible does not wait (its timeout is ignored), so a prompt that
+		// rendered a beat late went unanswered. Wait for whichever comes first:
+		// the "Discard" prompt, or the editor closing without one.
 		const discard = page.getByRole("button", { name: /discard/i }).first();
-		if (await discard.isVisible({ timeout: 2500 }).catch(() => false))
-			await discard.click();
+		const next = await Promise.race([
+			discard.waitFor({ state: "visible", timeout: 2500 }).then(
+				() => "asks",
+				() => null,
+			),
+			dialog.waitFor({ state: "hidden", timeout: 2500 }).then(
+				() => "closed",
+				() => null,
+			),
+		]);
+		if (next === "asks") await discard.click();
 		return JSON.stringify({
 			skill,
 			state: picked ? "would-add" : "picked-something-else",
@@ -1225,7 +1391,6 @@ export const addProfileSkill = async (page, { skill, dryRun, shot }) => {
 		() => true,
 		() => false,
 	);
-	await page.waitForTimeout(1000).catch(() => {});
 	// value: the name LinkedIn picked, which may differ from the record in case.
 	return JSON.stringify({
 		skill,
@@ -1297,7 +1462,7 @@ export const addProjectLink = async (page, { url, title, dryRun, shot }) => {
 	}
 	await box.fill(url);
 	const typed = await box.inputValue();
-	await page.screenshot({ path: shot }).catch(() => {});
+	if (shot) await page.screenshot({ path: shot }).catch(() => {});
 	if (dryRun || typed !== url) {
 		await discardAll();
 		return JSON.stringify({
@@ -1329,7 +1494,7 @@ export const addProjectLink = async (page, { url, title, dryRun, shot }) => {
 			save = saves.nth(i);
 		}
 	if (visible !== 1) {
-		await page.screenshot({ path: shot }).catch(() => {});
+		if (shot) await page.screenshot({ path: shot }).catch(() => {});
 		await discardAll();
 		return JSON.stringify({
 			error: `after Add, the media form shows ${visible} Save/Apply buttons (expected one); discarded`,
@@ -1354,4 +1519,166 @@ export const addProjectLink = async (page, { url, title, dryRun, shot }) => {
 		() => false,
 	);
 	return JSON.stringify({ mode: "save", controls, dialogGone: gone });
+};
+
+// A screenshot of the page as it stands: write.mjs takes one when a field
+// fails, so a passing run takes none unless asked (--screenshots).
+export const takeScreenshot = async (page, { shot }) => {
+	await page.screenshot({ path: shot });
+	return shot;
+};
+
+// Remove one media item from the open project editor. Probe 2026-10-30: each
+// item is a link whose text is "Edit media, <title>"; it opens an "Edit
+// media" dialog with the item's title and description inputs and Delete /
+// Back / Save. Past Delete the flow is unprobed, so a real run accepts only
+// this: an optional confirmation with one visible Delete, then the project
+// editor back without the item and with one Save, which it clicks. Anything
+// else is discarded unsaved. A dry run stops before Delete.
+export const removeProjectMedia = async (
+	page,
+	{ title, media, dryRun, shot },
+) => {
+	page.setDefaultTimeout(8000);
+	const editor = page.getByRole("dialog").first();
+	await editor.waitFor({ state: "visible", timeout: 15000 });
+	const nameBox = editor.getByLabel(/^Project name\*?$/i).first();
+	let name = null;
+	for (const end = Date.now() + 3000; ; await page.waitForTimeout(100)) {
+		name = await nameBox.inputValue({ timeout: 1000 }).catch(() => null);
+		if (name === title || Date.now() > end) break;
+	}
+	const discardAll = async () => {
+		for (let i = 0; i < 3; i++) {
+			const d = page.getByRole("dialog").last();
+			if (!(await d.count())) break;
+			await d
+				.getByRole("button", { name: /^(Dismiss|Close)$/ })
+				.first()
+				.click()
+				.catch(() => {});
+			const discard = page.getByRole("button", { name: /discard/i }).first();
+			const next = await Promise.race([
+				discard.waitFor({ state: "visible", timeout: 2000 }).then(
+					() => "asks",
+					() => null,
+				),
+				d.waitFor({ state: "hidden", timeout: 2000 }).then(
+					() => "closed",
+					() => null,
+				),
+			]);
+			if (next === "asks") await discard.click().catch(() => {});
+		}
+	};
+	if (name !== title)
+		return JSON.stringify({
+			error: `editor is for ${JSON.stringify(name)}, not ${JSON.stringify(title)}; not touching it`,
+		});
+	const escaped = media.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	const linkFor = () =>
+		page
+			.getByRole("dialog")
+			.locator("a")
+			.filter({ hasText: new RegExp(`^\\s*Edit media, ${escaped}\\s*$`) });
+	await linkFor()
+		.first()
+		.waitFor({ state: "attached", timeout: 8000 })
+		.catch(() => {});
+	const links = await linkFor().count();
+	if (links !== 1) {
+		const seen = await page
+			.getByRole("dialog")
+			.locator("a")
+			.filter({ hasText: /^\s*Edit media, / })
+			.evaluateAll((els) => els.map((e) => e.textContent.trim()));
+		return JSON.stringify({
+			error: `${links} media items titled ${JSON.stringify(media)} on this project (expected one); items: ${JSON.stringify(seen)}`,
+		});
+	}
+	await linkFor().first().scrollIntoViewIfNeeded();
+	await linkFor().first().click();
+	const mediaDialog = page
+		.getByRole("dialog")
+		.filter({ has: page.getByRole("heading", { name: /^Edit media$/ }) })
+		.first();
+	try {
+		await mediaDialog.waitFor({ state: "visible", timeout: 8000 });
+	} catch {
+		if (shot) await page.screenshot({ path: shot }).catch(() => {});
+		await discardAll();
+		return JSON.stringify({ error: 'no "Edit media" dialog opened' });
+	}
+	const firstInput = mediaDialog
+		.locator("input:not([type=hidden]), textarea")
+		.first();
+	let shown = null;
+	for (const end = Date.now() + 3000; ; await page.waitForTimeout(100)) {
+		shown = await firstInput.inputValue({ timeout: 1000 }).catch(() => null);
+		if (shown === media || Date.now() > end) break;
+	}
+	const del = mediaDialog
+		.getByRole("button", { name: /^delete$/i })
+		.filter({ visible: true });
+	const nDel = await del.count();
+	if (shown !== media || nDel !== 1) {
+		await discardAll();
+		return JSON.stringify({
+			error: `the media editor reads ${JSON.stringify(shown)} with ${nDel} visible Delete button(s); expected ${JSON.stringify(media)} and one; discarded`,
+		});
+	}
+	if (shot) await page.screenshot({ path: shot }).catch(() => {});
+	if (dryRun) {
+		await discardAll();
+		return JSON.stringify({
+			mode: "dry",
+			media: shown,
+			wouldClick: "Delete",
+			editorsLeftOpen: await page.getByRole("dialog").count(),
+		});
+	}
+	await del.first().click();
+	// Either a confirmation (answer its one visible Delete) or straight back
+	// to the project editor. Wait for whichever comes.
+	const projectSave = page
+		.getByRole("dialog")
+		.filter({ hasNot: page.getByRole("heading", { name: /^Edit media$/ }) })
+		.getByRole("button", { name: "Save", exact: true })
+		.filter({ visible: true });
+	let confirmed = false;
+	for (const end = Date.now() + 10000; Date.now() < end; ) {
+		if (!(await linkFor().count()) && (await mediaDialog.count()) === 0) break;
+		if (!confirmed) {
+			// The confirmation may be a dialog or an alertdialog.
+			const yes = page
+				.locator('[role="dialog"], [role="alertdialog"]')
+				.filter({
+					hasNot: page.getByRole("heading", { name: /^Edit media$/ }),
+				})
+				.getByRole("button", { name: /^delete$/i })
+				.filter({ visible: true });
+			if ((await yes.count()) === 1) {
+				await yes.click();
+				confirmed = true;
+				continue;
+			}
+		}
+		await page.waitForTimeout(150);
+	}
+	const stillThere = await linkFor().count();
+	const saves = await projectSave.count();
+	if (stillThere || saves !== 1) {
+		if (shot) await page.screenshot({ path: shot }).catch(() => {});
+		await discardAll();
+		return JSON.stringify({
+			error: `after Delete, the project editor shows the item ${stillThere ? "still" : "gone"} and ${saves} Save button(s) (expected gone and one); discarded unsaved. Delete may itself have saved: re-export before retrying`,
+			confirmed,
+		});
+	}
+	await projectSave.first().click();
+	const gone = await editor.waitFor({ state: "hidden", timeout: 20000 }).then(
+		() => true,
+		() => false,
+	);
+	return JSON.stringify({ mode: "save", media, confirmed, dialogGone: gone });
 };

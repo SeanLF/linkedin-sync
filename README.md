@@ -80,7 +80,17 @@ node src/cli.mjs drift                 # see what you changed
 node src/cli.mjs write --dry-run about # rehearse a write (fills and discards)
 node src/cli.mjs write about           # actually write it
 node src/cli.mjs export && node src/cli.mjs drift   # prove it landed
+
+node src/cli.mjs write headline about project.x   # several, one browser session
+node src/cli.mjs write --dry-run --all-drift       # every field drift calls stale
 ```
+
+Several fields in one `write` share one browser attach and one login check;
+each still opens its own editor, is read back and saved on its own, and a
+failing one does not stop the rest (the exit code is the worst field's).
+`--all-drift` refuses a mirror older than your last write: re-export first, or
+an entry created since would read as absent and be created twice. Screenshots
+are taken only when a field fails; `--screenshots` takes one at every step.
 
 The browser is **visible by default** so you can watch each write happen and
 review it in real time. Set `LINKEDIN_HEADLESS=1` for no window (unattended use).
