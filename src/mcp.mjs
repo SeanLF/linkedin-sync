@@ -177,11 +177,27 @@ export function startMcp({
 					{ type: "text", text: "detached; shared Chrome left running" },
 				],
 			};
-		const result = await send(
+		let result = await send(
 			"tools/call",
 			{ name, arguments: args || {} },
 			timeoutMs,
 		);
+		// The first navigation after a run that discarded an editor can come
+		// back net::ERR_ABORTED (2026-10-29, three times in a row, each fine on
+		// a second try): the page is still settling its own route change. One
+		// retry, for navigation only; anything else fails as before.
+		if (
+			name === "browser_navigate" &&
+			result?.isError &&
+			/ERR_ABORTED/.test(JSON.stringify(result.content ?? ""))
+		) {
+			await new Promise((r) => setTimeout(r, 1500));
+			result = await send(
+				"tools/call",
+				{ name, arguments: args || {} },
+				timeoutMs,
+			);
+		}
 		if (result?.isError) {
 			const text =
 				result.content
