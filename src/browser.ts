@@ -105,6 +105,8 @@ function voyager(request: APIRequestContext, csrf: string): Voyager {
 			},
 			maxRedirects: 0,
 		});
+		// A call in flight when another got the 429 stops here too.
+		if (stopped) throw new StopError("stopped after LinkedIn answered 429");
 		if (r.status() === 429) {
 			stopped = true;
 			throw new StopError(

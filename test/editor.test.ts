@@ -267,10 +267,13 @@ it("adding a skill refuses to save with the share switch on", async ({
 	await expect(page.getByRole("dialog")).toHaveCount(0); // closed, not left in the next step's way
 });
 
-it("a dry run refuses what the real run would (share switch on)", async ({
+it("a dry run reports what the real run would refuse, with its read-back", async ({
 	page,
 }) => {
 	await dialog(page, { shareOn: true });
-	await expect(runEditor(page, role(), "dry")).rejects.toThrow(/is ON/u);
+	const out = await runEditor(page, role(), "dry");
+	expect(out.ok).toBe(false); // the real run would refuse
+	expect(out.outcome).toMatch(/would refuse: .*is ON/u);
+	expect(out.results.every((r) => r.ok)).toBe(true); // and the read-back is still shown
 	await expect(page.getByRole("dialog")).toHaveCount(0);
 });

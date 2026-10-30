@@ -210,7 +210,7 @@ async function writeField(run: Run, f: Field, b: Block): Promise<Code> {
 			`  ${r.ok ? "ok " : "BAD"} ${r.control.padEnd(34)} ${r.ok ? "" : `want ${JSON.stringify(r.want)} got ${JSON.stringify(r.got)}`}`.trimEnd(),
 		);
 	run.say(`  ${filled.outcome}`);
-	return filled.results.every((r) => r.ok) ? 0 : 1;
+	return filled.ok ? 0 : 1;
 }
 
 /** Run `fn` on one attached Chrome, with a Playwright trace kept for each failing step. */

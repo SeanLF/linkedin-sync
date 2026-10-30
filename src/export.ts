@@ -595,9 +595,23 @@ export async function exportProfile(
 		return plc ? pageList(api, plc) : [];
 	};
 
-	const [info, cards, xp, sk, recs, ...rest] = await Promise.all([
+	// The name and headline first: without your own Profile record the export
+	// cannot succeed, so it stops before any section read goes out.
+	const [info, cards] = await Promise.all([
 		graph(`profileUrn:${urn}`, QUERY.cards),
 		graph(`profileUrn:${urn}`, QUERY.cards2),
+	]);
+	// Your own Profile record carries the name and headline.
+	const me = [lookup, info, cards]
+		.flatMap((r) => r.included ?? [])
+		.filter((i) => i.$type?.includes("Profile") && i.entityUrn === profileUrn)
+		.flatMap((i) => Me.safeParse(i).data ?? [])[0];
+	// Without it the headline would read as empty: stale, when the read is what broke.
+	if (!me)
+		throw new Error(
+			"your own profile record is not in the response; the cards query may have rotated",
+		);
+	const [xp, sk, recs, ...rest] = await Promise.all([
 		attempt("sections.Experience", () => readExperience(plcs, warnings)),
 		attempt("sections.Skills", () => readSkills(api, plcs)),
 		attempt("sections.Recommendations", () => readRecommendations(plcs)),
@@ -606,17 +620,6 @@ export async function exportProfile(
 				[name, await attempt(`sections.${name}`, () => list(slug))] as const,
 		),
 	]);
-	// Your own Profile record carries the name and headline.
-	const me = [lookup, info, cards]
-		.flatMap((r) => r.included ?? [])
-		.filter((i) => i.$type?.includes("Profile") && i.entityUrn === profileUrn)
-		.flatMap((i) => Me.safeParse(i).data ?? [])[0];
-	// Checked before the entity reads: no traffic for an export that cannot succeed.
-	// Without it the headline would read as empty: stale, when the read is what broke.
-	if (!me)
-		throw new Error(
-			"your own profile record is not in the response; the cards query may have rotated",
-		);
 	const entities: Record<string, unknown[]> = {};
 	for (const kind of Object.keys(RAW) as EntityKind[]) {
 		const rows = await attempt(`entities.${kind}`, () =>

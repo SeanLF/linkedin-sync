@@ -184,7 +184,6 @@ async function openDialog(
 	return dialog;
 }
 
-/** Refuse while "Share with your network" is on. LinkedIn renders one switch as two elements; every one must be off. */
 type Notify = Editor["notify"];
 /** The share switch's state, or why it refuses: LinkedIn renders one switch as two elements, and every one must be off. */
 async function quietness(
@@ -215,8 +214,12 @@ async function refuse(
 	dialog: Locator,
 	says: string,
 ): Promise<never> {
-	await discard(page, dialog).catch(() => undefined);
-	throw new Refused(says);
+	const closed = await discard(page, dialog).then(
+		() => "",
+		(e: Error) =>
+			`; the editor could not be closed either (${e.message.split("\n")[0]})`,
+	);
+	throw new Refused(`${says}${closed}`);
 }
 
 /** Click Save and wait for the editor to close. Under headless the page can close on Save while the write lands; the export decides. */
@@ -250,6 +253,8 @@ async function save(
 export interface Filled {
 	results: { control: string; want: string; got: string; ok: boolean }[];
 	outcome: string;
+	/** Whether a save would go (or went) through: every control as the record, and the share switch off. */
+	ok: boolean;
 }
 
 /** Fill an open editor from its plan, read it back, then save, discard, or (probe) describe it. */
@@ -263,7 +268,7 @@ export async function runEditor(
 	if (mode === "probe") {
 		const snapshot = await dialog.ariaSnapshot();
 		await discard(page, dialog);
-		return { results: [], outcome: snapshot };
+		return { results: [], ok: true, outcome: snapshot };
 	}
 	const steps = mode === "noop" ? [] : ed.steps;
 	const located: [Step, Locator][] = [];
@@ -297,9 +302,13 @@ export async function runEditor(
 	// A dry run refuses whatever the real run would, then discards.
 	if (mode === "dry") {
 		const quiet = await quietness(dialog, ed.notify);
-		if (!quiet.ok) await refuse(page, dialog, quiet.says);
 		await discard(page, dialog);
-		return { results, outcome: `discarded (${quiet.says})` };
+		const ok = quiet.ok && results.every((r) => r.ok);
+		return {
+			results,
+			ok,
+			outcome: `discarded (${quiet.ok ? quiet.says : `a real run would refuse: ${quiet.says}`})`,
+		};
 	}
 	if (!results.every((r) => r.ok))
 		await refuse(
@@ -307,7 +316,7 @@ export async function runEditor(
 			dialog,
 			"the editor does not read back as the record; not saving",
 		);
-	return { results, outcome: await save(page, dialog, ed.notify) };
+	return { results, ok: true, outcome: await save(page, dialog, ed.notify) };
 }
 
 /** Delete the open editor's entry. A dry run stops at the confirmation and cancels it. */
@@ -407,8 +416,10 @@ export async function runAddSkill(
 			() => box.inputValue(),
 			() => undefined,
 		);
-	const quiet = await quietness(dialog, "if-present");
-	if (!quiet.ok) await refuse(page, dialog, quiet.says);
+	if (dryRun) {
+		const quiet = await quietness(dialog, "if-present");
+		if (!quiet.ok) await refuse(page, dialog, quiet.says);
+	}
 	if (dryRun || picked === undefined) {
 		await discard(page, dialog);
 		if (picked === undefined)
@@ -433,6 +444,12 @@ function projectEditor(page: Page, title: string): Promise<Locator> {
 	});
 }
 
+/** The media flows can save the project before its own Save: check its share switch before any click. */
+async function assertProjectQuiet(page: Page, editor: Locator): Promise<void> {
+	const quiet = await quietness(editor, "if-present");
+	if (!quiet.ok) await refuse(page, editor, quiet.says);
+}
+
 /** Close every open dialog unsaved. */
 async function discardAll(page: Page): Promise<void> {
 	for (let i = 0; i < 3 && (await page.getByRole("dialog").count()); i++)
@@ -452,6 +469,7 @@ export async function runAddLink(
 	dryRun: boolean,
 ): Promise<string> {
 	const editor = await projectEditor(page, title);
+	await assertProjectQuiet(page, editor);
 	if (await editor.getByLabel(/^Project URL$/iu).count()) {
 		await discardAll(page);
 		throw new Refused(
@@ -524,7 +542,7 @@ export async function runRemoveMedia(
 	media: string,
 	dryRun: boolean,
 ): Promise<string> {
-	await projectEditor(page, title);
+	await assertProjectQuiet(page, await projectEditor(page, title));
 	const item = page
 		.getByRole("dialog")
 		.locator("a")
