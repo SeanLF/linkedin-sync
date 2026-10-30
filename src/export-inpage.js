@@ -29,6 +29,52 @@ const SECTION_SLUGS = {
 	Featured: "featured", // 200 on 2026-09-12; empty until a card exists
 };
 
+// One structured collection, every page of it, or null when the pages cannot
+// be trusted to be all of it. Null is "unreadable": export.mjs leaves the
+// collection out of the mirror and every reader and writer refuses on it.
+// A short read must never pass as complete: a writer that sees an entry
+// missing creates it again. So a page that failed, a page whose shape is
+// not the one below, an element with no matching record, or a count short
+// of paging.total all give null (the last three throw, so the reason lands
+// in the export's warnings). Without paging.total, only a page shorter than
+// the one asked for proves it was the last.
+// fetchPage(start, count) -> the normalized+json response.
+const collectEntities = async (fetchPage, type, toRow) => {
+	const COUNT = 100;
+	const out = [];
+	for (let start = 0; ; ) {
+		const page = await fetchPage(start, COUNT);
+		if (page?.failed) return null;
+		const order = page?.data?.["*elements"];
+		if (!Array.isArray(order) || !Array.isArray(page.included ?? []))
+			throw new Error(`unexpected response shape at start=${start}`);
+		const byUrn = new Map(
+			(page.included ?? [])
+				.filter((i) => i?.$type?.endsWith(`.${type}`))
+				.map((i) => [i.entityUrn, i]),
+		);
+		for (const u of order) {
+			const e = byUrn.get(u);
+			if (!e) throw new Error(`element ${u} has no ${type} record`);
+			const row = toRow(u, e);
+			for (const k of Object.keys(row))
+				if (row[k] === null || row[k] === undefined) delete row[k];
+			out.push(row);
+		}
+		const total = page.data.paging?.total;
+		start += order.length;
+		if (typeof total === "number") {
+			if (start >= total) return out;
+			if (order.length === 0)
+				throw new Error(
+					`read ${out.length} of ${total}; a page came back empty`,
+				);
+		} else if (order.length < COUNT) return out;
+		else if (start >= COUNT * 50)
+			throw new Error(`no paging.total and still paging at ${start}`);
+	}
+};
+
 (async () => {
 	try {
 		const csrf = document.cookie.match(/JSESSIONID="?([^";]+)/)?.[1];
@@ -57,7 +103,7 @@ const SECTION_SLUGS = {
 						"";
 					warnings.push(`API ${r.status}: ${endpoint}...${hint}`);
 					console.warn(warnings[warnings.length - 1]);
-					return { included: [], data: {} };
+					return { included: [], data: {}, failed: true };
 				}
 				return r.json();
 			});
@@ -79,6 +125,7 @@ const SECTION_SLUGS = {
 			const descriptions = [];
 			const skillTexts = [];
 			const children = [];
+			const media = [];
 
 			const collectText = (text) => {
 				if (text.startsWith("Skills: ")) {
@@ -96,6 +143,7 @@ const SECTION_SLUGS = {
 					const child = parseEntity(sc.entityComponent);
 					if (child) children.push(child);
 				}
+				if (sc.mediaComponent) media.push(parseMedia(sc.mediaComponent));
 			};
 
 			for (const sub of ec.subComponents?.components || []) {
@@ -109,7 +157,29 @@ const SECTION_SLUGS = {
 				entry.description = descriptions.join("\n").replace(/\n{3,}/g, "\n\n");
 			if (skillTexts.length) entry.skills = skillTexts;
 			if (children.length) entry.roles = children;
+			if (media.length) entry.media = media;
 			return Object.keys(entry).length ? entry : null;
+		};
+
+		// A media item (image, document, link) attached to an entry. An external
+		// link carries its URL; an upload, and a link LinkedIn could not unfurl,
+		// carries only a LinkedIn viewer URL, so `url` is null and `kind` comes
+		// from the viewer's type= parameter (probe 2026-10-29: a LINK item with no
+		// thumbnail and a viewer URL whose page reads "This page doesn't exist").
+		const parseMedia = (mc) => {
+			const target = mc.actionTarget || mc.thumbnail?.actionTarget || "";
+			const viewer = /multiple-media-viewer/.test(target);
+			const item = {
+				title: mc.titleV2?.text?.text || mc.title?.text || "",
+				kind: viewer
+					? target.match(/[?&]type=([A-Z_]+)/)?.[1] || "UNKNOWN"
+					: "LINK",
+				url: viewer ? null : target || null,
+				thumbnail: Boolean(mc.thumbnail?.entityImage),
+			};
+			const description = mc.description?.text?.text;
+			if (description) item.description = description;
+			return item;
 		};
 
 		const parseElements = (elements) => {
@@ -331,21 +401,141 @@ const SECTION_SLUGS = {
 			return recs;
 		};
 
+		// --- Step 7b: Structured entities (the edit forms' own data) ---
+		// The sections above are what the page renders: display strings. A few
+		// fields never render (an education's grade, a credential ID, which role
+		// an honour belongs to) and every editor URL carries the entry's numeric
+		// id, so the same records are also read from the dash REST collections
+		// the edit forms are built from (probe 2026-10-29). A collection that
+		// fails to load is left out, never written as empty: drift reads a
+		// missing collection as unreadable and an empty one as "no entries".
+		const ENTITY_KINDS = {
+			positions: ["profilePositions", "Position"],
+			educations: ["profileEducations", "Education"],
+			certifications: ["profileCertifications", "Certification"],
+			honors: ["profileHonors", "Honor"],
+			publications: ["profilePublications", "Publication"],
+			volunteering: ["profileVolunteerExperiences", "VolunteerExperience"],
+			projects: ["profileProjects", "Project"],
+			skills: ["profileSkills", "Skill"],
+		};
+		const isoDate = (d) =>
+			d?.year
+				? [
+						String(d.year),
+						d.month ? String(d.month).padStart(2, "0") : null,
+						d.day ? String(d.day).padStart(2, "0") : null,
+					]
+						.filter(Boolean)
+						.join("-")
+				: null;
+		const isoRange = (r) =>
+			r ? { start: isoDate(r.start), end: isoDate(r.end) } : null;
+		// "urn:li:fsd_profileEducation:(ACoA...,123456789)" -> "123456789", the
+		// id the editor URL takes: /details/education/edit/forms/123456789/
+		const entityId = (urn) => urn?.match(/,([^,)]+)\)$/)?.[1] ?? null;
+		const occupation = (u) =>
+			u?.profilePosition
+				? { position: entityId(u.profilePosition) }
+				: u?.profileEducation
+					? { education: entityId(u.profileEducation) }
+					: null;
+		const NORMALIZE = {
+			positions: (e) => ({
+				title: e.title,
+				company: e.companyName,
+				location: e.locationName,
+				dates: isoRange(e.dateRange),
+				description: e.description,
+			}),
+			educations: (e) => ({
+				school: e.schoolName,
+				degree: e.degreeName,
+				field: e.fieldOfStudy,
+				grade: e.grade,
+				activities: e.activities,
+				dates: isoRange(e.dateRange),
+				description: e.description,
+			}),
+			certifications: (e) => ({
+				name: e.name,
+				issuer: e.authority,
+				dates: isoRange(e.dateRange),
+				credentialId: e.licenseNumber,
+				url: e.url,
+			}),
+			honors: (e) => ({
+				title: e.title,
+				issuer: e.issuer,
+				date: isoDate(e.issuedOn),
+				associated: occupation(e.occupationUnion),
+				description: e.description,
+			}),
+			publications: (e) => ({
+				title: e.name,
+				publisher: e.publisher,
+				date: isoDate(e.publishedOn),
+				url: e.url,
+				description: e.description,
+			}),
+			volunteering: (e) => ({
+				organization: e.companyName,
+				role: e.role,
+				cause: e.cause,
+				dates: isoRange(e.dateRange),
+				description: e.description,
+			}),
+			projects: (e) => ({
+				title: e.title,
+				url: e.url,
+				dates: isoRange(e.dateRange),
+				associated: occupation(e.occupationUnion),
+				description: e.description,
+			}),
+			skills: (e) => ({ name: e.name }),
+		};
+		const fetchEntities = async (kind) => {
+			const [collection, type] = ENTITY_KINDS[kind];
+			const out = await collectEntities(
+				(start, count) =>
+					get(
+						`/voyager/api/identity/dash/${collection}?q=viewee&profileUrn=${urn}&start=${start}&count=${count}`,
+					),
+				type,
+				(u, e) => ({ id: entityId(u), ...NORMALIZE[kind](e) }),
+			);
+			if (out) console.log(`  entities.${kind}: ${out.length}`);
+			return out;
+		};
+		const fetchAllEntities = async () => {
+			const entities = {};
+			for (const kind of Object.keys(ENTITY_KINDS)) {
+				const rows = await fetchEntities(kind).catch((err) => {
+					warnings.push(`entities.${kind}: ${err.message}`);
+					return null;
+				});
+				if (rows) entities[kind] = rows;
+			}
+			return entities;
+		};
+
 		// --- Step 8: Fetch all sections in parallel, then assemble ---
 		console.log("Fetching all sections in parallel...");
-		const [experience, skills, recs, ...sectionResults] = await Promise.all([
-			fetchExperience(),
-			fetchSkills(),
-			fetchRecommendations(),
-			...Object.entries(SECTION_SLUGS).map(([name, slug]) =>
-				fetchPagedList(slug, name)
-					.then((items) => ({ name, items }))
-					.catch((err) => {
-						console.warn(`  ${name} failed, skipping:`, err.message);
-						return null;
-					}),
-			),
-		]);
+		const [experience, skills, recs, entities, ...sectionResults] =
+			await Promise.all([
+				fetchExperience(),
+				fetchSkills(),
+				fetchRecommendations(),
+				fetchAllEntities(),
+				...Object.entries(SECTION_SLUGS).map(([name, slug]) =>
+					fetchPagedList(slug, name)
+						.then((items) => ({ name, items }))
+						.catch((err) => {
+							console.warn(`  ${name} failed, skipping:`, err.message);
+							return null;
+						}),
+				),
+			]);
 
 		const profile = {
 			name: me ? `${me.firstName} ${me.lastName}` : vanity,
@@ -354,6 +544,7 @@ const SECTION_SLUGS = {
 			profileUrn,
 			exportedAt: new Date().toISOString(),
 			sections: {},
+			entities,
 		};
 
 		if (textSections.About) profile.sections.About = textSections.About;
