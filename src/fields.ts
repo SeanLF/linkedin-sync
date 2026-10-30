@@ -231,13 +231,16 @@ function positionField(b: Block): Field {
 				throw new Error(
 					`no role in entities.positions fits ${what}; positions are never created here`,
 				);
-			const steps: Step[] = [
-				{
-					kind: "text",
-					control: { css: '[contenteditable="true"]' },
-					value: b.text,
-				},
-			];
+			// An empty block manages presence and dates, never the description.
+			const steps: Step[] = b.text.trim()
+				? [
+						{
+							kind: "text",
+							control: { css: '[contenteditable="true"]' },
+							value: b.text,
+						},
+					]
+				: [];
 			if (company !== undefined)
 				steps.push(text("^Company or organization", company));
 			if (range) steps.push(...roleDates(range, "working", "Start", "End"));
@@ -268,7 +271,8 @@ function projectField(b: Block): Field {
 	const { title = "", dates, link } = b.attrs;
 	// The page has no Projects section at all when there are none: that is
 	// "none" only if the full collection read says so, else it is unreadable.
-	const shown = (m: Mirror) => projectsShown(m).find((p) => p.title === title);
+	const shown = (m: Mirror) =>
+		section(m, "Projects").find((p) => p.title === title);
 	const record = (m: Mirror) =>
 		onlyOne(
 			entities(m, "projects").filter((p) => p.title === title),
@@ -338,7 +342,12 @@ function projectField(b: Block): Field {
 				);
 			const steps: Step[] = [];
 			if (!e) steps.push(text("^Project name\\*?$", title));
-			steps.push({ kind: "text", control: { css: "textarea" }, value: b.text });
+			if (b.text.trim())
+				steps.push({
+					kind: "text",
+					control: { css: "textarea" },
+					value: b.text,
+				});
 			if (range)
 				steps.push(
 					...monthYear(range.start, 0),
@@ -362,15 +371,6 @@ function projectField(b: Block): Field {
 	};
 }
 
-/**
- * The rendered projects. The page has no Projects section when there are
- * none: that is "none" only if the full collection read agrees, else unreadable.
- */
-const projectsShown = (m: Mirror): Item[] =>
-	m.sections.Projects === undefined && m.entities.projects?.length === 0
-		? []
-		: section(m, "Projects");
-
 /** Media health, for a project with media: links LinkedIn could not preview, and dead ones under --check-links. */
 export function mediaFacet(
 	f: Field,
@@ -384,7 +384,7 @@ export function mediaFacet(
 		unwritten: true,
 		optional: true,
 		read: (m) => {
-			const r = projectsShown(m).find((x) => x.title === p.title);
+			const r = section(m, "Projects").find((x) => x.title === p.title);
 			const urls = p.urls(m);
 			if (!(r && (urls.length || r.media?.length))) return;
 			const problems = [

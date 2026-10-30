@@ -185,32 +185,53 @@ async function openDialog(
 }
 
 /** Refuse while "Share with your network" is on. LinkedIn renders one switch as two elements; every one must be off. */
-async function assertQuiet(dialog: Locator, ed: Editor): Promise<string> {
+type Notify = Editor["notify"];
+/** The share switch's state, or why it refuses: LinkedIn renders one switch as two elements, and every one must be off. */
+async function quietness(
+	dialog: Locator,
+	notify: Notify,
+): Promise<{ ok: boolean; says: string }> {
 	const switches = await dialog.getByRole("switch").all();
-	if (!switches.length && ed.notify === "required")
-		throw new Refused(
-			'no "Share with your network" switch in this editor; it changed shape, not saving',
-		);
+	if (!switches.length && notify === "required")
+		return {
+			ok: false,
+			says: 'no "Share with your network" switch in this editor; it changed shape, not saving',
+		};
 	for (const sw of switches)
 		if (await sw.isChecked())
-			throw new Refused(
-				'"Share with your network" is ON in this editor; not saving. Turn it off by hand first.',
-			);
-	return switches.length ? "share-with-network off" : "no share switch";
+			return {
+				ok: false,
+				says: '"Share with your network" is ON in this editor; not saving. Turn it off by hand first.',
+			};
+	return {
+		ok: true,
+		says: switches.length ? "share-with-network off" : "no share switch",
+	};
+}
+
+/** Close the editor unsaved, then refuse: a half-filled dialog must not be left in the next step's way. */
+async function refuse(
+	page: Page,
+	dialog: Locator,
+	says: string,
+): Promise<never> {
+	await discard(page, dialog).catch(() => undefined);
+	throw new Refused(says);
 }
 
 /** Click Save and wait for the editor to close. Under headless the page can close on Save while the write lands; the export decides. */
-async function save(page: Page, dialog: Locator): Promise<string> {
-	// Every Save, whichever flow led here: never with the share switch on.
-	for (const sw of await dialog.getByRole("switch").all())
-		if (await sw.isChecked())
-			throw new Refused(
-				'"Share with your network" is ON in this editor; not saving. Turn it off by hand first.',
-			);
+async function save(
+	page: Page,
+	dialog: Locator,
+	notify: Notify = "if-present",
+): Promise<string> {
+	// Every Save goes through here, and none with the share switch on.
+	const quiet = await quietness(dialog, notify);
+	if (!quiet.ok) await refuse(page, dialog, quiet.says);
 	await dialog.getByRole("button", { name: "Save", exact: true }).click();
 	try {
 		await dialog.waitFor({ state: "hidden", timeout: TIMEOUTS.close });
-		return "saved; dialog closed";
+		return `saved; dialog closed; ${quiet.says}`;
 	} catch (err) {
 		if (page.isClosed())
 			return "saved; the page closed after Save (the export decides)";
@@ -273,17 +294,20 @@ export async function runEditor(
 		.toBe(true)
 		.catch(() => undefined);
 	const results = await readAll();
+	// A dry run refuses whatever the real run would, then discards.
 	if (mode === "dry") {
-		const quiet = await assertQuiet(dialog, ed).catch((e: Error) => e.message);
+		const quiet = await quietness(dialog, ed.notify);
+		if (!quiet.ok) await refuse(page, dialog, quiet.says);
 		await discard(page, dialog);
-		return { results, outcome: `discarded (${quiet})` };
+		return { results, outcome: `discarded (${quiet.says})` };
 	}
 	if (!results.every((r) => r.ok))
-		throw new Refused(
+		await refuse(
+			page,
+			dialog,
 			"the editor does not read back as the record; not saving",
 		);
-	const quiet = await assertQuiet(dialog, ed);
-	return { results, outcome: `${await save(page, dialog)}; ${quiet}` };
+	return { results, outcome: await save(page, dialog, ed.notify) };
 }
 
 /** Delete the open editor's entry. A dry run stops at the confirmation and cancels it. */
@@ -383,6 +407,8 @@ export async function runAddSkill(
 			() => box.inputValue(),
 			() => undefined,
 		);
+	const quiet = await quietness(dialog, "if-present");
+	if (!quiet.ok) await refuse(page, dialog, quiet.says);
 	if (dryRun || picked === undefined) {
 		await discard(page, dialog);
 		if (picked === undefined)
@@ -464,6 +490,11 @@ export async function runAddLink(
 		throw new Refused(
 			`after Add, the media form shows ${await confirm.count()} Save/Apply buttons (expected one); discarded`,
 		);
+	}
+	const formQuiet = await quietness(form, "if-present");
+	if (!formQuiet.ok) {
+		await discardAll(page);
+		throw new Refused(formQuiet.says);
 	}
 	await confirm.click();
 	const projectSave = page

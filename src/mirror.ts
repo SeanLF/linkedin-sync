@@ -180,6 +180,16 @@ export function section(
 	name: "Experience" | "Projects" | "Volunteering",
 ): Item[] {
 	const rows = m.sections[name];
+	// The page has no section when there is nothing in it: that is "none" only
+	// if the full collection read agrees; otherwise the read failed.
+	const kind = (
+		{
+			Experience: "positions",
+			Projects: "projects",
+			Volunteering: "volunteering",
+		} as const
+	)[name];
+	if (!rows && m.entities[kind]?.length === 0) return [];
 	if (!rows)
 		throw new Error(`sections.${name} missing from the mirror. Re-export.`);
 	return rows;

@@ -93,7 +93,10 @@ class ApiError extends Error {
 }
 
 function voyager(request: APIRequestContext, csrf: string): Voyager {
+	// After one 429, every call in flight or to come stops: more traffic after "stop" makes it worse.
+	let stopped = false;
 	return async (path, schema) => {
+		if (stopped) throw new StopError("stopped after LinkedIn answered 429");
 		const r = await request.get(`${ORIGIN}${path}`, {
 			headers: {
 				"csrf-token": csrf,
@@ -102,10 +105,12 @@ function voyager(request: APIRequestContext, csrf: string): Voyager {
 			},
 			maxRedirects: 0,
 		});
-		if (r.status() === 429)
+		if (r.status() === 429) {
+			stopped = true;
 			throw new StopError(
 				"LinkedIn answered 429 (too many requests); stopping",
 			);
+		}
 		if (!r.ok()) throw new ApiError(r.status(), path);
 		return schema.parse(await r.json());
 	};
@@ -128,7 +133,7 @@ export async function connect(): Promise<Session> {
 		return await session(browser);
 	} catch (err) {
 		// A refusal here (signed out) must not leave the CDP socket holding the process open.
-		await browser.close();
+		await browser.close().catch(() => undefined);
 		throw err;
 	}
 }

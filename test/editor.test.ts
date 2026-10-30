@@ -251,7 +251,7 @@ it("adding a skill refuses to save with the share switch on", async ({
 	<span role="switch" aria-checked="true" aria-label="Notify network"></span>
 	<label for="k">Skill*</label><input id="k">
 	<ul role="listbox" id="opts"></ul>
-	<button aria-label="Dismiss">x</button><button id="save">Save</button>
+	<button aria-label="Dismiss" onclick="ed.remove()">x</button><button id="save">Save</button>
 </div>
 <script>
 	window.saved = null;
@@ -264,4 +264,13 @@ it("adding a skill refuses to save with the share switch on", async ({
 </script>`);
 	await expect(runAddSkill(page, "Rust", false)).rejects.toThrow(/is ON/u);
 	expect(await saved(page)).toBeNull();
+	await expect(page.getByRole("dialog")).toHaveCount(0); // closed, not left in the next step's way
+});
+
+it("a dry run refuses what the real run would (share switch on)", async ({
+	page,
+}) => {
+	await dialog(page, { shareOn: true });
+	await expect(runEditor(page, role(), "dry")).rejects.toThrow(/is ON/u);
+	await expect(page.getByRole("dialog")).toHaveCount(0);
 });

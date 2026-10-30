@@ -606,6 +606,17 @@ export async function exportProfile(
 				[name, await attempt(`sections.${name}`, () => list(slug))] as const,
 		),
 	]);
+	// Your own Profile record carries the name and headline.
+	const me = [lookup, info, cards]
+		.flatMap((r) => r.included ?? [])
+		.filter((i) => i.$type?.includes("Profile") && i.entityUrn === profileUrn)
+		.flatMap((i) => Me.safeParse(i).data ?? [])[0];
+	// Checked before the entity reads: no traffic for an export that cannot succeed.
+	// Without it the headline would read as empty: stale, when the read is what broke.
+	if (!me)
+		throw new Error(
+			"your own profile record is not in the response; the cards query may have rotated",
+		);
 	const entities: Record<string, unknown[]> = {};
 	for (const kind of Object.keys(RAW) as EntityKind[]) {
 		const rows = await attempt(`entities.${kind}`, () =>
@@ -614,11 +625,6 @@ export async function exportProfile(
 		if (rows) entities[kind] = rows;
 	}
 
-	// Your own Profile record carries the name and headline.
-	const me = [lookup, info, cards]
-		.flatMap((r) => r.included ?? [])
-		.filter((i) => i.$type?.includes("Profile") && i.entityUrn === profileUrn)
-		.flatMap((i) => Me.safeParse(i).data ?? [])[0];
 	const text = cardTexts(cards.included ?? []);
 	const recommendations = recs && Object.keys(recs).length ? recs : undefined;
 	const sections = Object.fromEntries(
@@ -633,11 +639,6 @@ export async function exportProfile(
 			),
 		].filter(([, v]) => v !== undefined),
 	);
-	// Without it the headline would read as empty: stale, when the read is what broke.
-	if (!me)
-		throw new Error(
-			"your own profile record is not in the response; the cards query may have rotated",
-		);
 	return Mirror.parse({
 		name: `${me.firstName} ${me.lastName}`,
 		headline: me.headline ?? "",

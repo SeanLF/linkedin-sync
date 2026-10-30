@@ -273,6 +273,31 @@ it.describe("review findings", () => {
 			verdicts(fence('position.x match="Nowhere Inc"'))["position.x"],
 		).toBe("absent");
 	});
+	it("an empty position or project block never writes a description", () => {
+		const m = mirror();
+		const pos = fieldFor(
+			record(
+				fence(
+					'position.a match="Acme" role="Engineer" dates="Mar 2020 - Present"',
+				),
+			).get("position.a") as never,
+		);
+		const proj = fieldFor(
+			record(fence('project.w title="Widget"')).get("project.w") as never,
+		);
+		const css = (steps: { control: object }[] | undefined) =>
+			(steps ?? []).filter((s) => "css" in s.control);
+		expect(css(pos.editor?.(m).steps)).toEqual([]);
+		expect(css(proj.editor?.(m).steps)).toEqual([]);
+	});
+	it("no Experience section is 'none' when the positions read is empty", () => {
+		const none = mirror();
+		delete none.sections.Experience;
+		none.entities.positions = [];
+		expect(
+			verdicts(fence('position.x match="Acme"', "Text."), none)["position.x"],
+		).toBe("absent");
+	});
 	it("no Projects section is 'none' when the full collection read is empty, so the first one can be created", () => {
 		const none = mirror();
 		delete none.sections.Projects;
