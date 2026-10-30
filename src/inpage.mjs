@@ -260,6 +260,21 @@ export const deleteProject = async (page, { title: wanted, dryRun, shot }) => {
 	await del.click();
 	await page.waitForTimeout(1200);
 	const confirm = page.getByRole("dialog").last();
+	// No confirmation dialog of its own means the press may
+	// have deleted outright, so nothing more is clicked.
+	const confirmShown =
+		(await confirm.isVisible().catch(() => false)) &&
+		!(await confirm
+			.getByRole("button", { name: /^delete project$/i })
+			.count()
+			.catch(() => 0));
+	if (!confirmShown) {
+		await page.screenshot({ path: shot }).catch(() => {});
+		return JSON.stringify({
+			error:
+				'no confirmation dialog appeared after "Delete project"; the press may have deleted outright, so nothing more was clicked. Re-export before anything else.',
+		});
+	}
 	const buttons = [];
 	for (const b of await confirm.getByRole("button").all())
 		buttons.push(
@@ -376,7 +391,7 @@ export const describeDialog = async (page, { shot }) => {
 	await page.screenshot({ path: shot, fullPage: false }).catch(() => {});
 	const controls = [];
 	const SEL =
-		'input:not([type=hidden]), textarea, [contenteditable="true"], [role="textbox"]';
+		'input:not([type=hidden]), textarea, select, [contenteditable="true"], [role="textbox"]';
 	const text = (loc) =>
 		loc
 			.first()
@@ -477,6 +492,8 @@ export const fillDialog = async (
 		titleLabel,
 		notifySwitch,
 		dates,
+		dateLabels,
+		extra,
 		editing,
 		monthNames,
 	},
@@ -507,6 +524,17 @@ export const fillDialog = async (
 			await titleBox.fill(title);
 		}
 	}
+	// Other text inputs on the same editor (a role's company), each found by an
+	// anchored label and required to be exactly one control.
+	for (const x of mode === "noop" ? [] : (extra ?? [])) {
+		const loc = dialog.getByLabel(new RegExp(x.pattern, "i"));
+		const nx = await loc.count();
+		if (nx !== 1)
+			return JSON.stringify({
+				error: `expected one control labelled /${x.pattern}/, found ${nx}; not saving`,
+			});
+		await loc.fill(x.value);
+	}
 	if (isTextarea) {
 		await box.fill(text); // exact, newline-preserving
 	} else {
@@ -514,7 +542,55 @@ export const fillDialog = async (
 		await page.keyboard.press("Meta+A");
 		await page.keyboard.insertText(text);
 	}
-	if (dates && mode !== "noop") {
+	let datesWanted = null;
+	if (dates && mode !== "noop" && dateLabels) {
+		// A labelled date block (the role editor, probe 2026-10-29): "Start
+		// month", "Start year*", "End month", "End year*" and the "currently
+		// working" checkbox, each found by an anchored label and required to be
+		// exactly one control.
+		const one = async (src) => {
+			const l = dialog.getByLabel(new RegExp(src, "i"));
+			const n = await l.count();
+			if (n !== 1) throw new Error(`${n} controls labelled /${src}/`);
+			return l.first();
+		};
+		try {
+			const current = await one(dateLabels.current);
+			const wantCurrent = dates.end === null;
+			if ((await current.isChecked()) !== wantCurrent)
+				await current
+					.click({ force: true, timeout: 3000 })
+					.catch(() => current.dispatchEvent("click"));
+			if ((await current.isChecked()) !== wantCurrent)
+				return JSON.stringify({
+					error: `could not switch "currently working" ${wantCurrent ? "on" : "off"}; not saving`,
+				});
+			const [sy, sm] = dates.start.split("-");
+			await (await one(dateLabels.startMonth)).selectOption({
+				label: monthNames[Number(sm) - 1],
+			});
+			await (await one(dateLabels.startYear)).selectOption({ label: sy });
+			if (dates.end) {
+				const [ey, em] = dates.end.split("-");
+				await (await one(dateLabels.endMonth)).selectOption({
+					label: monthNames[Number(em) - 1],
+				});
+				await (await one(dateLabels.endYear)).selectOption({ label: ey });
+			}
+			datesWanted = {
+				start: `${monthNames[Number(sm) - 1]} ${sy}`,
+				current: wantCurrent,
+				end: dates.end
+					? `${monthNames[Number(dates.end.split("-")[1]) - 1]} ${dates.end.split("-")[0]}`
+					: undefined,
+			};
+		} catch (e) {
+			return JSON.stringify({
+				error: `the editor's date controls are not the expected shape (${e.message.split("\n")[0]}); not saving`,
+			});
+		}
+		await page.waitForTimeout(200);
+	} else if (dates && mode !== "noop") {
 		// Probe 2026-09-12: two Month/Year select pairs (start, then end) and one
 		// checkbox, "I am currently working on this project", which hides the end
 		// pair when checked. Labels are exact, so getByLabel finds only these.
@@ -571,7 +647,22 @@ export const fillDialog = async (
 	await page.waitForTimeout(400);
 	const after = await read();
 	let datesBack = null;
-	if (dates && mode !== "noop") {
+	if (datesWanted) {
+		const opt = async (src) =>
+			dialog
+				.getByLabel(new RegExp(src, "i"))
+				.first()
+				.evaluate((e) => e.options[e.selectedIndex]?.text ?? "");
+		datesBack = {
+			start: `${await opt(dateLabels.startMonth)} ${await opt(dateLabels.startYear)}`,
+			current: await dialog
+				.getByLabel(new RegExp(dateLabels.current, "i"))
+				.first()
+				.isChecked(),
+		};
+		if (!datesBack.current)
+			datesBack.end = `${await opt(dateLabels.endMonth)} ${await opt(dateLabels.endYear)}`;
+	} else if (dates && mode !== "noop") {
 		const months = dialog.getByLabel("Month", { exact: true });
 		const years = dialog.getByLabel("Year", { exact: true });
 		const opt = async (sel) =>
@@ -595,6 +686,16 @@ export const fillDialog = async (
 			.replace(/\n+/g, "\n")
 			.trim();
 	const matches = norm(after) === norm(text);
+	const extraBack = [];
+	for (const x of mode === "noop" ? [] : (extra ?? []))
+		extraBack.push({
+			pattern: x.pattern,
+			want: x.value,
+			got: await dialog
+				.getByLabel(new RegExp(x.pattern, "i"))
+				.inputValue()
+				.catch(() => null),
+		});
 	await page.screenshot({ path: shot }).catch(() => {});
 	const result = {
 		mode,
@@ -603,6 +704,13 @@ export const fillDialog = async (
 		matches,
 		after: matches ? undefined : after.slice(0, 300),
 		dates: datesBack,
+		datesWanted,
+		extra: extraBack.length ? extraBack : undefined,
+		extraMatch: extraBack.every((x) => x.got === x.want),
+		// JSON drops the undefined end of a current role, as datesBack never has one.
+		datesMatch: datesWanted
+			? JSON.stringify(datesBack) === JSON.stringify(datesWanted)
+			: undefined,
 	};
 	if (mode === "dry") {
 		await dialog
@@ -624,6 +732,14 @@ export const fillDialog = async (
 		return JSON.stringify({
 			error: "field does not read back as the desired text; not saving",
 			after: after.slice(0, 300),
+		});
+	if (!result.extraMatch)
+		return JSON.stringify({
+			error: `fields read back wrong: ${JSON.stringify(extraBack)}; not saving`,
+		});
+	if (datesWanted && !result.datesMatch)
+		return JSON.stringify({
+			error: `dates read back as ${JSON.stringify(datesBack)}, not ${JSON.stringify(datesWanted)}; not saving`,
 		});
 	if (notifySwitch) {
 		// LinkedIn renders the one control as two role=switch elements (an input
@@ -706,4 +822,536 @@ export const readVanity = async (page) => {
 	}, csrf);
 	const m = body.text.match(/"publicIdentifier":"([^"]+)"/);
 	return JSON.stringify({ status: body.status, vanity: m ? m[1] : null });
+};
+
+// Fill an open editor from a list of steps (built in schema.mjs), read every
+// control back, then save, or discard for a dry run. One writer for every
+// section whose editor is a plain form: education, honours, publications,
+// volunteering, certifications.
+//
+// A step is {kind: "text"|"select"|"checkbox", pattern, nth?, value|option}.
+// `pattern` is an anchored label regex: getByLabel with a plain string is a
+// case-insensitive substring match, and "Role" also hits "I am currently
+// volunteering in this role". `expect` lists identity controls that must
+// already read a given value (editing the wrong entry is refused). Typeahead
+// fields (school, organization, issuer) are typed, not picked from the
+// suggestion list; LinkedIn keeps typed text, unlinked to a company page.
+export const fillForm = async (
+	page,
+	{ steps, expect, heading, mode, shot },
+) => {
+	page.setDefaultTimeout(6000);
+	const dialog = page.getByRole("dialog").first();
+	try {
+		await dialog.waitFor({ state: "visible", timeout: 15000 });
+	} catch {
+		await page.screenshot({ path: shot }).catch(() => {});
+		return JSON.stringify({ error: `no editor opened at ${page.url()}` });
+	}
+	await page.waitForTimeout(800);
+	const head = (
+		(await dialog
+			.getByRole("heading")
+			.first()
+			.textContent()
+			.catch(() => "")) || ""
+	).trim();
+	if (heading && !new RegExp(heading, "i").test(head))
+		return JSON.stringify({
+			error: `the open dialog is "${head}", not a ${heading} editor; not touching it`,
+		});
+	const norm = (v) =>
+		String(v ?? "")
+			.replace(/\r/g, "")
+			.replace(/ /g, " ")
+			.replace(/[ \t]+$/gm, "")
+			.replace(/\n+/g, "\n")
+			.trim();
+	const all = (st) => dialog.getByLabel(new RegExp(st.pattern, "i"));
+	const at = (st) => all(st).nth(st.nth ?? 0);
+	const name = (st) => `/${st.pattern}/${st.nth ? ` #${st.nth + 1}` : ""}`;
+	const readStep = async (st) => {
+		const loc = at(st);
+		if (st.kind === "select")
+			return loc.evaluate((e) => ({
+				index: e.selectedIndex,
+				text: (e.options[e.selectedIndex]?.text ?? "").trim(),
+			}));
+		if (st.kind === "checkbox") return loc.isChecked();
+		return (await loc.getAttribute("contenteditable")) === "true"
+			? loc.innerText()
+			: loc.inputValue();
+	};
+	for (const ex of expect ?? []) {
+		if (!(await all(ex).count()))
+			return JSON.stringify({
+				error: `no control ${name(ex)} to check which entry this is; not touching it`,
+			});
+		const v = await readStep({ ...ex, kind: "text" });
+		if (norm(v) !== norm(ex.value))
+			return JSON.stringify({
+				error: `this editor's ${name(ex)} reads ${JSON.stringify(v)}, not ${JSON.stringify(ex.value)}: the wrong entry; not touching it`,
+			});
+	}
+	for (const st of steps) {
+		const n = await all(st).count();
+		if (n <= (st.nth ?? 0)) {
+			await page.screenshot({ path: shot }).catch(() => {});
+			return JSON.stringify({
+				error: `no control ${name(st)} in this editor (found ${n}); it changed shape, not saving`,
+			});
+		}
+		const loc = at(st);
+		if (st.kind === "select") {
+			if (st.option === "") await loc.selectOption({ index: 0 });
+			else {
+				const options = await loc.evaluate((e) =>
+					[...e.options].map((o) => o.text.trim()),
+				);
+				if (!options.includes(st.option))
+					return JSON.stringify({
+						error: `${name(st)} has no option ${JSON.stringify(st.option)}; it offers ${JSON.stringify(options.slice(0, 40))}`,
+					});
+				await loc.selectOption({ label: st.option });
+			}
+		} else if (st.kind === "checkbox") {
+			// The volunteer editor's checkbox is a visually hidden input that sits
+			// outside the viewport, so even a forced click is refused (2026-10-29);
+			// a dispatched click toggles it the way a click on its label would.
+			if ((await loc.isChecked()) !== st.value)
+				await loc
+					.click({ force: true, timeout: 3000 })
+					.catch(() => loc.dispatchEvent("click"));
+		} else if ((await loc.getAttribute("contenteditable")) === "true") {
+			await loc.click();
+			await page.keyboard.press("Meta+A");
+			await page.keyboard.insertText(st.value);
+		} else {
+			await loc.fill(st.value);
+		}
+		await page.waitForTimeout(250);
+	}
+	await page.waitForTimeout(600);
+	const results = [];
+	for (const st of steps) {
+		let got;
+		try {
+			got = await readStep(st);
+		} catch (e) {
+			got = `unreadable: ${e.message.split("\n")[0]}`;
+		}
+		let ok;
+		let shown = got;
+		if (st.kind === "select") {
+			shown = got?.text;
+			ok = st.option === "" ? got?.index === 0 : got?.text === st.option;
+		} else if (st.kind === "checkbox") ok = got === st.value;
+		else ok = norm(got) === norm(st.value);
+		results.push({
+			control: name(st),
+			want:
+				st.kind === "select"
+					? st.option || "(blank)"
+					: String(st.value).slice(0, 80),
+			got: String(shown).slice(0, 80),
+			ok,
+		});
+	}
+	await page.screenshot({ path: shot }).catch(() => {});
+	const out = {
+		mode,
+		heading: head,
+		results,
+		ok: results.every((r) => r.ok),
+	};
+	// Save is refused while any "notify your network" switch is on; LinkedIn
+	// renders one control as two role=switch elements, so every one must be off.
+	const switches = dialog.getByRole("switch");
+	let notifyOn = false;
+	for (let i = 0; i < (await switches.count()); i++)
+		if (
+			await switches
+				.nth(i)
+				.evaluate(
+					(e) =>
+						e.checked === true || e.getAttribute("aria-checked") === "true",
+				)
+		)
+			notifyOn = true;
+	out.notifyNetwork = notifyOn ? "ON" : "off";
+	if (mode === "dry") {
+		await dialog
+			.getByRole("button", { name: /^(Dismiss|Close)$/ })
+			.first()
+			.click();
+		const discard = page.getByRole("button", { name: /discard/i }).first();
+		if (await discard.isVisible({ timeout: 2500 }).catch(() => false))
+			await discard.click();
+		out.dialogGone = await dialog
+			.waitFor({ state: "hidden", timeout: 10000 })
+			.then(
+				() => true,
+				() => false,
+			);
+		return JSON.stringify(out);
+	}
+	if (!out.ok)
+		return JSON.stringify({
+			...out,
+			error: "the editor does not read back as the record; not saving",
+		});
+	if (notifyOn)
+		return JSON.stringify({
+			...out,
+			error:
+				'"Notify network" is ON in this editor; not saving. Turn it off by hand first.',
+		});
+	await dialog.getByRole("button", { name: "Save", exact: true }).click();
+	// As in the field writer: under headless the page can report itself closed
+	// right after Save while the write landed, so nothing here may throw.
+	out.dialogGone = await dialog
+		.waitFor({ state: "hidden", timeout: 20000 })
+		.then(
+			() => true,
+			() => false,
+		);
+	try {
+		await page.waitForTimeout(1500);
+		await page.screenshot({ path: shot });
+		out.url = page.url();
+		if (!out.dialogGone)
+			out.stillOpen = (await dialog.innerText().catch(() => ""))
+				.replace(/\s+/g, " ")
+				.slice(0, 300);
+	} catch (e) {
+		out.pageClosedAfterSave = e.message.split("\n")[0];
+	}
+	return JSON.stringify(out);
+};
+
+// Delete the entry whose editor is open, after checking it is the one asked
+// for (heading and identity controls). A dry run stops at the confirmation,
+// reports it, and cancels.
+export const deleteEntry = async (
+	page,
+	{ heading, expect, button, dryRun, shot },
+) => {
+	page.setDefaultTimeout(6000);
+	const editor = page.getByRole("dialog").first();
+	try {
+		await editor.waitFor({ state: "visible", timeout: 15000 });
+	} catch {
+		await page.screenshot({ path: shot }).catch(() => {});
+		return JSON.stringify({ error: `no editor opened at ${page.url()}` });
+	}
+	await page.waitForTimeout(800);
+	const head = (
+		(await editor
+			.getByRole("heading")
+			.first()
+			.textContent()
+			.catch(() => "")) || ""
+	).trim();
+	if (heading && !new RegExp(heading, "i").test(head))
+		return JSON.stringify({
+			error: `the open dialog is "${head}", not /${heading}/; not deleting`,
+		});
+	for (const ex of expect ?? []) {
+		const loc = editor.getByLabel(new RegExp(ex.pattern, "i")).first();
+		const v = await loc.inputValue().catch(() => null);
+		if ((v ?? "").trim() !== (ex.value ?? "").trim())
+			return JSON.stringify({
+				error: `this editor's /${ex.pattern}/ reads ${JSON.stringify(v)}, not ${JSON.stringify(ex.value)}; not deleting`,
+			});
+	}
+	const del = editor.getByRole("button", { name: button, exact: true });
+	if ((await del.count()) !== 1)
+		return JSON.stringify({
+			error: `expected one "${button}" button, found ${await del.count()}`,
+		});
+	await del.click();
+	await page.waitForTimeout(1200);
+	const confirm = page.getByRole("dialog").last();
+	// The confirmation is a dialog of its own: the last one, and not the editor
+	// (which still carries the entry's delete button). Without one, the press
+	// may have deleted outright, so nothing more is clicked in either mode.
+	const confirmShown =
+		(await confirm.isVisible().catch(() => false)) &&
+		!(await confirm
+			.getByRole("button", { name: button, exact: true })
+			.count()
+			.catch(() => 0));
+	if (!confirmShown) {
+		await page.screenshot({ path: shot }).catch(() => {});
+		return JSON.stringify({
+			error: `no confirmation dialog appeared after "${button}"; the press may have deleted outright, so nothing more was clicked. Re-export before anything else.`,
+		});
+	}
+	const text = (await confirm.textContent().catch(() => ""))
+		.replace(/\s+/g, " ")
+		.trim()
+		.slice(0, 240);
+	const buttons = [];
+	for (const b of await confirm.getByRole("button").all())
+		buttons.push(
+			(
+				(await b.textContent()) ||
+				(await b.getAttribute("aria-label")) ||
+				""
+			).trim(),
+		);
+	// LinkedIn doubles controls, so pick the visible "Delete".
+	const yesAll = confirm.getByRole("button", { name: /^delete$/i });
+	let yes = null;
+	for (let i = 0; i < (await yesAll.count()); i++)
+		if (
+			await yesAll
+				.nth(i)
+				.isVisible()
+				.catch(() => false)
+		) {
+			yes = yesAll.nth(i);
+			break;
+		}
+	if (dryRun) {
+		const no = confirm
+			.getByRole("button", { name: /^(no thanks|cancel|dismiss)$/i })
+			.first();
+		if (!(await no.count()))
+			return JSON.stringify({
+				error: `the confirmation offers no Cancel; left open. Buttons: ${JSON.stringify(buttons)}`,
+			});
+		await no.click();
+		return JSON.stringify({
+			mode: "dry",
+			heading: head,
+			confirmText: text,
+			confirmButtons: buttons,
+			wouldClick: yes ? "Delete" : null,
+		});
+	}
+	if (!yes)
+		return JSON.stringify({
+			error: `no visible "Delete" confirm button; buttons: ${JSON.stringify(buttons)}`,
+		});
+	await yes.click();
+	const gone = await editor.waitFor({ state: "hidden", timeout: 20000 }).then(
+		() => true,
+		() => false,
+	);
+	let after = null;
+	try {
+		await page.waitForTimeout(1500);
+		await page.screenshot({ path: shot });
+		after = page.url();
+	} catch {
+		after =
+			"page closed after confirm (headless does this; the export decides)";
+	}
+	return JSON.stringify({
+		mode: "delete",
+		heading: head,
+		editorGone: gone,
+		after,
+	});
+};
+
+// Add one skill to the profile from the standalone "Add skill" form
+// (/skills/edit/forms/new/, probe 2026-10-29: one "Skill*" typeahead). The
+// typed name must come back as an exact (case-insensitive) suggestion to be
+// picked: a skill is a LinkedIn entity, not free text.
+export const addProfileSkill = async (page, { skill, dryRun, shot }) => {
+	page.setDefaultTimeout(10000);
+	const dialog = page.getByRole("dialog").first();
+	await dialog.waitFor({ state: "visible", timeout: 15000 });
+	await page.waitForTimeout(800);
+	const box = dialog.getByLabel(/^Skill\*?$/i).first();
+	if (!(await box.count())) return JSON.stringify({ skill, state: "no-input" });
+	await box.click();
+	// Typed key by key, this typeahead drops keystrokes while it re-renders:
+	// "Machine Learning" arrived as "Mae Learning" (2026-10-29). So fill all
+	// but the last character, type that one to fire the search, and check the
+	// box holds the whole name before reading any suggestion.
+	await box.fill(skill.slice(0, -1));
+	await box.pressSequentially(skill.slice(-1), { delay: 100 });
+	await page.waitForTimeout(2500);
+	const typed = await box.inputValue().catch(() => "");
+	if (typed !== skill) {
+		await page.screenshot({ path: shot }).catch(() => {});
+		return JSON.stringify({ skill, state: "typed-wrong", typed });
+	}
+	const escaped = skill.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	const exact = new RegExp(`^\\s*${escaped}\\s*$`, "i");
+	const result = page
+		.locator('[role="option"]')
+		.filter({ hasText: exact })
+		.first();
+	if (!(await result.count())) {
+		const seen = await page
+			.locator('[role="option"]')
+			.evaluateAll((els) => els.map((e) => e.textContent.trim()).slice(0, 10));
+		await page.screenshot({ path: shot }).catch(() => {});
+		const close = dialog.getByRole("button", { name: /^(Dismiss|Close)$/ });
+		await close
+			.first()
+			.click()
+			.catch(() => {});
+		const discard = page.getByRole("button", { name: /discard/i }).first();
+		if (await discard.isVisible({ timeout: 2500 }).catch(() => false))
+			await discard.click();
+		return JSON.stringify({ skill, state: "no-exact-suggestion", seen });
+	}
+	await result.click();
+	await page.waitForTimeout(1000);
+	const value = await box.inputValue().catch(() => "");
+	const picked = value.trim().toLowerCase() === skill.toLowerCase();
+	if (dryRun || !picked) {
+		await dialog
+			.getByRole("button", { name: /^(Dismiss|Close)$/ })
+			.first()
+			.click()
+			.catch(() => {});
+		const discard = page.getByRole("button", { name: /discard/i }).first();
+		if (await discard.isVisible({ timeout: 2500 }).catch(() => false))
+			await discard.click();
+		return JSON.stringify({
+			skill,
+			state: picked ? "would-add" : "picked-something-else",
+			value,
+		});
+	}
+	await dialog.getByRole("button", { name: "Save", exact: true }).click();
+	const gone = await dialog.waitFor({ state: "hidden", timeout: 20000 }).then(
+		() => true,
+		() => false,
+	);
+	await page.waitForTimeout(1000).catch(() => {});
+	// value: the name LinkedIn picked, which may differ from the record in case.
+	return JSON.stringify({
+		skill,
+		state: gone ? "added" : "save-unconfirmed",
+		value,
+	});
+};
+
+// Attach a link to the open project editor: Add media, Add a link, paste the
+// URL (probe 2026-10-29: a menu with "Add a link" and "Add a document", then
+// one input, "Paste or type a link to an article, file or video.", and Add /
+// Back / Save). Past "Add" the flow is unprobed: LinkedIn fetches a preview
+// and shows its own title/description form. So a real run requires that form
+// to offer exactly one visible Save (or Apply), clicks it, then saves the
+// project; anything else stops without saving. A dry run stops before "Add".
+export const addProjectLink = async (page, { url, title, dryRun, shot }) => {
+	page.setDefaultTimeout(8000);
+	const editor = page.getByRole("dialog").first();
+	await editor.waitFor({ state: "visible", timeout: 15000 });
+	await page.waitForTimeout(800);
+	const name = await editor
+		.getByLabel(/^Project name\*?$/i)
+		.first()
+		.inputValue()
+		.catch(() => null);
+	if (name !== title)
+		return JSON.stringify({
+			error: `editor is for ${JSON.stringify(name)}, not ${JSON.stringify(title)}; not touching it`,
+		});
+	const discardAll = async () => {
+		for (let i = 0; i < 3; i++) {
+			const d = page.getByRole("dialog").last();
+			if (!(await d.count())) break;
+			await d
+				.getByRole("button", { name: /^(Dismiss|Close)$/ })
+				.first()
+				.click()
+				.catch(() => {});
+			await page.waitForTimeout(600);
+			const discard = page.getByRole("button", { name: /discard/i }).first();
+			if (await discard.isVisible({ timeout: 1500 }).catch(() => false))
+				await discard.click();
+			await page.waitForTimeout(600);
+		}
+	};
+	if (await editor.getByLabel(/^Project URL$/i).count()) {
+		await discardAll();
+		return JSON.stringify({
+			error:
+				'this project still has the legacy "Project URL" field; LinkedIn shows that one link instead of media here, so set it by hand',
+		});
+	}
+	const add = editor.getByRole("button", { name: /^add media$/i }).first();
+	await add.scrollIntoViewIfNeeded();
+	await add.click();
+	await page.waitForTimeout(1500);
+	const item = page.getByRole("menuitem", { name: /add a link/i }).first();
+	if (!(await item.count())) {
+		await discardAll();
+		return JSON.stringify({ error: 'no "Add a link" in the Add media menu' });
+	}
+	await item.click();
+	await page.waitForTimeout(1500);
+	const panel = page.getByRole("dialog").last();
+	const box = panel.getByLabel(/paste or type a link/i).first();
+	if (!(await box.count())) {
+		await discardAll();
+		return JSON.stringify({ error: "no link box after Add a link" });
+	}
+	await box.fill(url);
+	const typed = await box.inputValue();
+	await page.screenshot({ path: shot }).catch(() => {});
+	if (dryRun || typed !== url) {
+		await discardAll();
+		return JSON.stringify({
+			mode: "dry",
+			typed,
+			ok: typed === url,
+			stoppedBefore: "Add (LinkedIn fetches the preview there)",
+		});
+	}
+	await panel.getByRole("button", { name: /^add$/i }).first().click();
+	await page.waitForTimeout(5000);
+	const form = page.getByRole("dialog").last();
+	const controls = await form
+		.locator("input:not([type=hidden]), textarea")
+		.evaluateAll((els) =>
+			els.map((e) => `${e.getAttribute("aria-label") || e.id}=${e.value}`),
+		);
+	const saves = form.getByRole("button", { name: /^(save|apply)$/i });
+	let save = null;
+	let visible = 0;
+	for (let i = 0; i < (await saves.count()); i++)
+		if (
+			await saves
+				.nth(i)
+				.isVisible()
+				.catch(() => false)
+		) {
+			visible++;
+			save = saves.nth(i);
+		}
+	if (visible !== 1) {
+		await page.screenshot({ path: shot }).catch(() => {});
+		await discardAll();
+		return JSON.stringify({
+			error: `after Add, the media form shows ${visible} Save/Apply buttons (expected one); discarded`,
+			controls,
+		});
+	}
+	await save.click();
+	await page.waitForTimeout(2500);
+	const back = page.getByRole("dialog").first();
+	const projectSave = back.getByRole("button", { name: "Save", exact: true });
+	if ((await projectSave.count()) !== 1) {
+		await discardAll();
+		return JSON.stringify({
+			error:
+				"the project editor did not come back with one Save; the media Save may itself have saved the project, so re-export before retrying",
+			controls,
+		});
+	}
+	await projectSave.click();
+	const gone = await back.waitFor({ state: "hidden", timeout: 20000 }).then(
+		() => true,
+		() => false,
+	);
+	return JSON.stringify({ mode: "save", controls, dialogGone: gone });
 };

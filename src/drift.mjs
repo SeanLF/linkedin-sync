@@ -17,16 +17,25 @@
 //   ./linkedin-drift.mjs                    compare, print a report
 //   ./linkedin-drift.mjs --max-age-days 30  how stale the mirror may be
 //   ./linkedin-drift.mjs --self-test        prove the comparator can fail
+//   ./linkedin-drift.mjs --check-links      also fetch every project link and
+//                                           report the ones that no longer resolve
 
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { countChars, parseBlocks } from "./copy-blocks.mjs";
 import {
-	datesLabel,
 	experienceByCompany,
+	fieldFromBlock,
 	fieldsFromBlocks,
+	MIRROR_MAX_AGE_DAYS,
+	mirrorAgeDays,
+	NONE,
 	normalize,
+	PRESENT,
+	parseDate,
+	parseRange,
+	planSkills,
 } from "./schema.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -67,7 +76,7 @@ export function compareField(field, profile, desired) {
 		return {
 			id: field.id,
 			verdict: VERDICTS.MATCH,
-			detail: `${countChars(b)} chars`,
+			detail: b === PRESENT ? "on LinkedIn" : `${countChars(b)} chars`,
 		};
 	return {
 		id: field.id,
@@ -76,6 +85,60 @@ export function compareField(field, profile, desired) {
 		desired: b,
 		at: firstDifference(a, b),
 	};
+}
+
+/**
+ * Every comparison one block makes: its main value, then each facet (a date
+ * range, a grade, a link) on its own line. Facets are the reason a block can be
+ * right in its text and wrong on the page: LinkedIn sorts undated projects
+ * last, and a role that ends a month late reads as a month longer.
+ */
+export function compareAll(f, profile, blocks) {
+	const text = blocks.get(f.id).text;
+	const desired = f.canonDesired ? f.canonDesired(text) : text;
+	const main = compareField(f, profile, desired);
+	if (main.verdict === VERDICTS.DRIFT && f.diff)
+		main.diff = f.diff(main.live, main.desired);
+	const facets = (f.facets ?? [])
+		.map((x) => ({ x, r: compareField(x, profile, x.desired) }))
+		// An optional facet (media health) with nothing to read is no line.
+		.filter(({ x, r }) => !(x.optional && r.verdict === VERDICTS.ABSENT))
+		.map(({ r }) => r);
+	return [main, ...facets];
+}
+
+/**
+ * url -> HTTP status (or an error string) for every link on a compared
+ * project. HEAD first; some hosts refuse HEAD, so a 403/405 is retried as GET.
+ */
+async function checkLinks(fields, profile) {
+	const urls = new Set();
+	for (const f of fields) {
+		try {
+			for (const u of f.urls?.(profile) ?? []) urls.add(u);
+		} catch {} // a shape error is reported by the comparison itself
+	}
+	const status = new Map();
+	await Promise.all(
+		[...urls].map(async (u) => {
+			const hit = (method) =>
+				fetch(u, {
+					method,
+					redirect: "follow",
+					signal: AbortSignal.timeout(15000),
+					headers: { "user-agent": "linkedin-sync link check" },
+				});
+			try {
+				let r = await hit("HEAD");
+				if (r.status === 403 || r.status === 405) r = await hit("GET");
+				status.set(u, r.status);
+			} catch (err) {
+				status.set(u, `unreachable (${err.cause?.code ?? err.message})`);
+			}
+		}),
+	);
+	console.log(`links    ${status.size} checked\n`);
+	return status;
 }
 
 /** Index of the first differing character, for a readable report. */
@@ -90,12 +153,6 @@ function excerpt(s, at, span = 60) {
 	const head = start > 0 ? "..." : "";
 	const tail = at + span < s.length ? "..." : "";
 	return (head + s.slice(start, at + span) + tail).replace(/\n/g, "\\n");
-}
-
-function mirrorAgeDays(profile) {
-	const t = Date.parse(profile?.exportedAt ?? "");
-	if (Number.isNaN(t)) return null;
-	return (Date.now() - t) / 86_400_000;
 }
 
 // --- self-test -------------------------------------------------------------
@@ -216,21 +273,520 @@ function selfTest() {
 			`${ok ? "ok  " : "FAIL"}  ${name.padEnd(28)} expected ${want}, got ${got}`,
 		);
 	}
+	failed += sectionSelfTest();
 	console.log(
 		failed
 			? `\n${failed} self-test failure(s)`
-			: "\nself-test: comparator produces every verdict and position reads pick one role or refuse",
+			: "\nself-test: comparator produces every verdict, position reads pick one role or refuse, and every section type reads unreadable when its data is missing",
 	);
 	return failed ? EXIT.broken : EXIT.clean;
 }
 
+// The section types read through the schema against a fixture shaped like a
+// real export (2026-10-29). Each case is one block and the verdict its main
+// value or one facet must produce. The UNREADABLE rows are the point: a type
+// whose data is missing from the mirror must say so, never match.
+function sectionSelfTest() {
+	const live = {
+		sections: {
+			Experience: [
+				{
+					title: "Acme Corp",
+					subtitle: "Permanent · 3 yrs",
+					roles: [
+						{
+							title: "Senior Software Engineer",
+							dates: "Feb 2019 - Feb 2021 · 2 yrs 1 mo",
+							description: "H",
+						},
+					],
+				},
+				{
+					title: "Université Exemple",
+					subtitle: "Part-time",
+					roles: [{ title: "Grader", description: "C" }],
+				},
+			],
+			Projects: [
+				{
+					title: "Weather Bot",
+					subtitle: "Apr 2024 - Present",
+					description: "D",
+					media: [
+						{
+							title: "Site",
+							kind: "LINK",
+							url: "https://a.example",
+							thumbnail: true,
+						},
+						{ title: "Repo", kind: "LINK", url: null, thumbnail: false },
+					],
+				},
+			],
+			Volunteering: [
+				{
+					title: "Developer",
+					subtitle: "Food Bank",
+					dates: "Mar 2016 - Present · 10 yrs",
+				},
+			],
+		},
+		entities: {
+			positions: [{ id: "1", title: "Grader", company: "University" }],
+			// The API holds this project as ending the month it started; the page
+			// says Present. Dates must read the page.
+			projects: [
+				{
+					id: "9",
+					title: "Weather Bot",
+					dates: { start: "2024-04", end: "2024-04" },
+				},
+			],
+			educations: [
+				{
+					id: "2",
+					school: "Example University",
+					degree: "BSc",
+					field: "Computer Science",
+					grade: "First Class Honours",
+					dates: { start: "2010", end: "2014" },
+				},
+				{ id: "3", school: "Example University", degree: "MSc" },
+			],
+			certifications: [
+				{
+					id: "4",
+					name: "Food Safety",
+					credentialId: "X-0000",
+					dates: { start: "2018-03" },
+				},
+				{ id: "5", name: "Diver" },
+			],
+			honors: [],
+			publications: [
+				{
+					id: "6",
+					title: "Paper",
+					publisher: "Example Press",
+					date: "2021-09-01",
+				},
+			],
+			volunteering: [
+				{
+					id: "7",
+					organization: "Food Bank",
+					role: "Developer",
+					cause: "SCIENCE_AND_TECHNOLOGY",
+				},
+			],
+			skills: [{ name: "SQL" }, { name: "Cartographie" }],
+		},
+	};
+	const bare = { sections: live.sections }; // an export from before entities
+	const cases = [
+		// [name, block id, attrs, text, comparison id ("" = main), profile, verdict]
+		[
+			"position end date drift",
+			"position.h",
+			{
+				match: "Acme",
+				role: "Senior Software Engineer",
+				dates: "Feb 2019 - Jan 2021",
+			},
+			"H",
+			"dates",
+			live,
+			VERDICTS.DRIFT,
+		],
+		[
+			"position dates as rendered",
+			"position.h",
+			{
+				match: "Acme",
+				role: "Senior Software Engineer",
+				dates: "Feb 2019 - Feb 2021",
+			},
+			"H",
+			"dates",
+			live,
+			VERDICTS.MATCH,
+		],
+		[
+			"role under the page's company name",
+			"position.c",
+			{ match: "University", role: "Grader" },
+			"C",
+			"",
+			live,
+			VERDICTS.MATCH,
+		],
+		[
+			"role at no such typed company",
+			"position.c",
+			{ match: "Nowhere", role: "Grader" },
+			"C",
+			"",
+			live,
+			VERDICTS.ABSENT,
+		],
+		[
+			"position company rename",
+			"position.c",
+			{
+				match: "University",
+				role: "Grader",
+				company: "Example University",
+			},
+			"",
+			"company",
+			live,
+			VERDICTS.DRIFT,
+		],
+		[
+			"position company, no entities",
+			"position.c",
+			{
+				match: "University",
+				role: "Grader",
+				company: "Example University",
+			},
+			"",
+			"company",
+			bare,
+			VERDICTS.UNREADABLE,
+		],
+		[
+			"project Present from page",
+			"project.d",
+			{ title: "Weather Bot", dates: "Apr 2024 - Present" },
+			"D",
+			"dates",
+			live,
+			VERDICTS.MATCH,
+		],
+		[
+			"project link present",
+			"project.d",
+			{ title: "Weather Bot", link: "https://a.example" },
+			"D",
+			"link",
+			live,
+			VERDICTS.MATCH,
+		],
+		[
+			"project link missing",
+			"project.d",
+			{ title: "Weather Bot", link: "https://b.example" },
+			"D",
+			"link",
+			live,
+			VERDICTS.DRIFT,
+		],
+		[
+			"project stale media",
+			"project.d",
+			{ title: "Weather Bot" },
+			"D",
+			"media",
+			live,
+			VERDICTS.DRIFT,
+		],
+		[
+			"education grade match",
+			"education.b",
+			{ match: "BSc", grade: "First Class Honours" },
+			"",
+			"grade",
+			live,
+			VERDICTS.MATCH,
+		],
+		[
+			"education grade drift",
+			"education.b",
+			{ match: "BSc", grade: "First Class Honours (4.0)" },
+			"",
+			"grade",
+			live,
+			VERDICTS.DRIFT,
+		],
+		[
+			"education year-only dates",
+			"education.b",
+			{ match: "BSc", dates: "2010 - 2014" },
+			"",
+			"dates",
+			live,
+			VERDICTS.MATCH,
+		],
+		[
+			"education ambiguous match",
+			"education.u",
+			{ match: "Example", grade: "A" },
+			"",
+			"",
+			live,
+			VERDICTS.UNREADABLE,
+		],
+		[
+			"education, no entities",
+			"education.b",
+			{ match: "BSc", grade: "A" },
+			"",
+			"",
+			bare,
+			VERDICTS.UNREADABLE,
+		],
+		[
+			"education facet, no entities",
+			"education.b",
+			{ match: "BSc", grade: "A" },
+			"",
+			"grade",
+			bare,
+			VERDICTS.UNREADABLE,
+		],
+		[
+			"education not on LinkedIn",
+			"education.p",
+			{ match: "PhD" },
+			"",
+			"",
+			live,
+			VERDICTS.ABSENT,
+		],
+		[
+			"empty honor block, none live",
+			"honor.n",
+			{ title: "Research Award" },
+			"",
+			"",
+			live,
+			VERDICTS.ABSENT,
+		],
+		[
+			"honor, no entities",
+			"honor.n",
+			{ title: "Research Award" },
+			"",
+			"",
+			bare,
+			VERDICTS.UNREADABLE,
+		],
+		[
+			"credential must clear",
+			"certification.s",
+			{ name: "Food Safety", credential: "" },
+			"",
+			"credential",
+			live,
+			VERDICTS.DRIFT,
+		],
+		[
+			"credential already clear",
+			"certification.d",
+			{ name: "Diver", credential: "" },
+			"",
+			"credential",
+			live,
+			VERDICTS.MATCH,
+		],
+		[
+			"certification present",
+			"certification.d",
+			{ name: "Diver" },
+			"",
+			"",
+			live,
+			VERDICTS.MATCH,
+		],
+		[
+			"cert issue date",
+			"certification.s",
+			{ name: "Food Safety", dates: "Mar 2018" },
+			"",
+			"dates",
+			live,
+			VERDICTS.MATCH,
+		],
+		[
+			"publication date at record precision",
+			"publication.p",
+			{ title: "Paper", date: "Sep 2021" },
+			"",
+			"date",
+			live,
+			VERDICTS.MATCH,
+		],
+		[
+			"publisher typo",
+			"publication.p",
+			{ title: "Paper", publisher: "Exmaple Press" },
+			"",
+			"publisher",
+			live,
+			VERDICTS.DRIFT,
+		],
+		[
+			"volunteer cause by label",
+			"volunteer.j",
+			{
+				match: "Food Bank",
+				role: "Developer",
+				cause: "Science and Technology",
+			},
+			"",
+			"cause",
+			live,
+			VERDICTS.MATCH,
+		],
+		[
+			"volunteer end date",
+			"volunteer.j",
+			{ match: "Food Bank", role: "Developer", dates: "Mar 2016 - 2023" },
+			"",
+			"dates",
+			live,
+			VERDICTS.DRIFT,
+		],
+		[
+			"volunteer dates, no page",
+			"volunteer.j",
+			{ match: "Food Bank", role: "Developer", dates: "Mar 2016 - 2023" },
+			"",
+			"dates",
+			{ entities: live.entities, sections: {} },
+			VERDICTS.UNREADABLE,
+		],
+		[
+			"skills in another order",
+			"skills",
+			{},
+			"Cartographie\nSQL",
+			"",
+			live,
+			VERDICTS.MATCH,
+		],
+		[
+			"skills rename",
+			"skills",
+			{},
+			"SQL\nMachine Learning",
+			"",
+			live,
+			VERDICTS.DRIFT,
+		],
+		["skills, no entities", "skills", {}, "SQL", "", bare, VERDICTS.UNREADABLE],
+	];
+	let failed = 0;
+	for (const [name, id, attrs, text, which, profile, want] of cases) {
+		const f = fieldFromBlock(id, attrs, { text });
+		const blocks = new Map([[id, { text, attrs }]]);
+		const all = compareAll(f, profile, blocks);
+		const r = all.find((x) => x.id === (which ? `${id}.${which}` : id));
+		const got = r?.verdict ?? "(no such comparison)";
+		const ok = got === want;
+		if (!ok) failed++;
+		console.log(
+			`${ok ? "ok  " : "FAIL"}  ${name.padEnd(36)} expected ${want}, got ${got}${ok ? "" : ` ${JSON.stringify(r)}`}`,
+		);
+	}
+	// The renamed skill must come back as one add and one remove.
+	const sk = compareAll(
+		fieldFromBlock("skills", {}, {}),
+		live,
+		new Map([["skills", { text: "SQL\nMachine Learning", attrs: {} }]]),
+	)[0];
+	const diffOk =
+		JSON.stringify(sk.diff) ===
+		JSON.stringify({
+			add: ["Machine Learning"],
+			remove: ["Cartographie"],
+			recase: [],
+		});
+	if (!diffOk) failed++;
+	console.log(
+		`${diffOk ? "ok  " : "FAIL"}  skills rename is one add, one remove      ${JSON.stringify(sk.diff)}`,
+	);
+	// A skill whose name differs only in case is the same LinkedIn skill: never
+	// an add plus a delete (the add would pick the live entity, the delete
+	// would then remove it), only a note to fix the record.
+	const cased = planSkills(["JavaScript", "SQL"], ["javascript", "SQL"]);
+	const casedOk =
+		JSON.stringify(cased) ===
+		JSON.stringify({
+			add: [],
+			remove: [],
+			recase: [{ record: "javascript", live: "JavaScript" }],
+		});
+	if (!casedOk) failed++;
+	console.log(
+		`${casedOk ? "ok  " : "FAIL"}  skills differing in case are recase only   ${JSON.stringify(cased)}`,
+	);
+	// Dates refuse what they cannot read; the old parser read this as Present,
+	// and the first-three-letters month match read "Junk" as June.
+	const refusals = [
+		"Mar 2016 - garbage",
+		"Smarch 2015",
+		"2015 - 2016 - 2017",
+		"Junk 2015",
+		"Marchy 2015",
+		"Feb 30, 2021",
+		"Jun 0, 2020",
+		"Apr 31, 2020",
+	];
+	for (const raw of refusals) {
+		let threw = false;
+		try {
+			parseRange(raw);
+		} catch {
+			threw = true;
+		}
+		if (!threw) failed++;
+		console.log(
+			`${threw ? "ok  " : "FAIL"}  dates ${JSON.stringify(raw).padEnd(30)} refused`,
+		);
+	}
+	const accepted = [
+		["June 2019", "2019-06"],
+		["Sept. 2019", null],
+		["Feb 29, 2024", "2024-02-29"],
+		["Sep 2021", "2021-09"],
+	];
+	for (const [raw, want] of accepted) {
+		const got = parseDate(raw);
+		const ok = got === want;
+		if (!ok) failed++;
+		console.log(
+			`${ok ? "ok  " : "FAIL"}  date ${JSON.stringify(raw).padEnd(31)} reads ${got}`,
+		);
+	}
+	// A publication stored at year precision has no day for the editor to
+	// shift, so building its steps must neither throw nor retype it.
+	let pubSteps;
+	try {
+		pubSteps = fieldFromBlock("publication.y", { title: "Old" }, { text: "" })
+			.form.steps({ creating: false, entry: { id: "8", date: "2015" } })
+			.map((x) => x.pattern);
+	} catch (e) {
+		pubSteps = `threw: ${e.message}`;
+	}
+	const pubOk = Array.isArray(pubSteps) && pubSteps.length === 0;
+	if (!pubOk) failed++;
+	console.log(
+		`${pubOk ? "ok  " : "FAIL"}  year-only stored publication date untouched ${JSON.stringify(pubSteps)}`,
+	);
+	if (NONE !== "(none)") failed++;
+	return failed;
+}
+
 // --- main ------------------------------------------------------------------
-function main() {
+async function main() {
 	const args = process.argv.slice(2);
 	if (args.includes("--self-test")) process.exit(selfTest());
 
 	const maxAgeIdx = args.indexOf("--max-age-days");
-	const maxAgeDays = maxAgeIdx === -1 ? 14 : Number(args[maxAgeIdx + 1]);
+	const maxAgeDays =
+		maxAgeIdx === -1 ? MIRROR_MAX_AGE_DAYS : Number(args[maxAgeIdx + 1]);
 
 	let profile;
 	try {
@@ -242,7 +798,10 @@ function main() {
 	}
 
 	const blocks = parseBlocks();
-	const { fields } = fieldsFromBlocks(blocks);
+	const linkStatus = args.includes("--check-links")
+		? await checkLinks(fieldsFromBlocks(blocks).fields, profile)
+		: undefined;
+	const { fields } = fieldsFromBlocks(blocks, { linkStatus });
 	const age = mirrorAgeDays(profile);
 
 	console.log(`mirror   ${profile.exportedAt ?? "(no exportedAt)"}`);
@@ -255,21 +814,7 @@ function main() {
 	}
 	console.log(`record   ${blocks.size} blocks\n`);
 
-	// A project's dates are a second field behind the same title: LinkedIn
-	// sorts undated projects last, so a matching description on a project with
-	// no dates is still a stale profile.
-	const results = fields.flatMap((f) => [
-		compareField(f, profile, blocks.get(f.id).text),
-		...(f.dates
-			? [
-					compareField(
-						{ id: `${f.id}.dates`, read: f.readDates },
-						profile,
-						datesLabel(f.dates),
-					),
-				]
-			: []),
-	]);
+	const results = fields.flatMap((f) => compareAll(f, profile, blocks));
 
 	const width = Math.max(...results.map((r) => r.id.length));
 	for (const r of results) {
@@ -281,13 +826,24 @@ function main() {
 			unreadable: "BROKEN",
 		}[r.verdict];
 		console.log(`${mark.padEnd(7)} ${r.id.padEnd(width)}  ${r.detail ?? ""}`);
-		if (r.verdict === VERDICTS.DRIFT) {
+		if (r.verdict === VERDICTS.DRIFT && r.diff) {
+			if (r.diff.add.length)
+				console.log(`        add     ${r.diff.add.join(", ")}`);
+			if (r.diff.remove.length)
+				console.log(`        remove  ${r.diff.remove.join(", ")}`);
+			for (const c of r.diff.recase ?? [])
+				console.log(
+					`        case    record ${JSON.stringify(c.record)}, LinkedIn ${JSON.stringify(c.live)} (fix the record; write leaves it)`,
+				);
+		} else if (r.verdict === VERDICTS.DRIFT) {
 			console.log(`        live    ${excerpt(r.live, r.at)}`);
 			console.log(`        record  ${excerpt(r.desired, r.at)}`);
 		}
 		if (r.verdict === VERDICTS.ABSENT) {
 			console.log(
-				`        not on LinkedIn yet (${countChars(r.desired)} chars in the record)`,
+				r.desired === PRESENT
+					? "        not on LinkedIn yet"
+					: `        not on LinkedIn yet (${countChars(r.desired)} chars in the record)`,
 			);
 		}
 		if (r.verdict === VERDICTS.UNREADABLE) {
@@ -332,4 +888,4 @@ function main() {
 	process.exit(stale ? EXIT.stale : EXIT.clean);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) main();
+if (import.meta.url === `file://${process.argv[1]}`) await main();

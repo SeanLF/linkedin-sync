@@ -20,7 +20,9 @@ because it proves each change landed.
   recommendations, featured, publications, honours, volunteering, and your
   first-degree connections.
 - **Writes that are proven, not hoped.** Headline, About, a position's
-  description and skills, and projects (add, edit, dates, delete). Each write is
+  description, dates, company and skills, projects (add, edit, dates, delete,
+  a link), education, honours, publications, volunteering and certifications
+  (add, edit, delete), and your skills list (add, delete). Each write is
   verified by re-exporting and re-comparing; the write channel (the UI) and the
   check channel (the API) are different surfaces, so a bug in one cannot hide in
   the other.
@@ -104,12 +106,57 @@ maps to. Where a company holds several roles, add `role="Exact role title"` to
 pick one: `match="Acme Corp" role="Senior Engineer"`. Without it the tool
 refuses rather than guess which role to read or write. This is the only per-user file. Everything else is machinery.
 
+The other attributes are values the block manages, each compared on its own
+drift line (`position.acme-corp.dates`). Leave one out and the tool leaves that
+value alone; set it to `""` and the tool makes it empty.
+
+| Block | Finds its entry by | Values it can carry | Text |
+|---|---|---|---|
+| `position.*` | `match`, `role` | `dates="Mar 2020 - Aug 2023"`, `company`, `skills` | description |
+| `project.*` | `title` | `dates`, `link` | description |
+| `education.*` | `match` (school, degree or field) | `school`, `degree`, `field`, `dates="2010 - 2014"`, `grade`, `activities` | description |
+| `honor.*` | `title` | `issuer`, `date="May 2015"`, `associated="Role at Company"` | description |
+| `publication.*` | `title` | `publisher`, `date`, `url` | description |
+| `volunteer.*` | `match` (organization), `role` | `cause`, `dates` | description |
+| `certification.*` | `name` | `issuer`, `dates="Mar 2018"` or `"Mar 2018 - Mar 2021"`, `credential`, `url` | none |
+| `skills` | | | one skill per line |
+
+    ```linkedin:certification.first-aid name="First Aid" credential=""
+    ```
+
+    ```linkedin:skills
+    PostgreSQL
+    Ruby on Rails
+    ```
+
+A block whose entry is not on LinkedIn yet is created by `write`, but only
+from a mirror younger than drift's 14-day limit whose collection was read in
+full: "not in the mirror" is how a duplicate gets made. `write
+--delete honor "Old award"` removes one the record no longer carries (also
+`education`, `publication`, `volunteer`, `certification`, `skill`). `write
+skills` adds the missing skills and deletes the extra ones; LinkedIn has no
+rename, so a renamed skill is a delete and an add and loses its endorsements.
+The adds go first and any failed add cancels every delete. Skill names
+compare without case (LinkedIn spells the skill), so a record that writes
+`Javascript` for a live `JavaScript` gets a note to fix the record, never a
+delete. An empty skills block is refused. An option `write` does not know
+(`--dryrun`) is an error, not ignored.
+`drift --check-links` also fetches every project link and reports dead ones,
+and every project with media gets a `.media` line naming links LinkedIn could
+not preview.
+
 ## Honest limits
 
 - **macOS + Chrome only.** The session import is keychain- and Chrome-specific.
 - **It breaks when LinkedIn ships.** Query IDs and dialog shapes rotate. A
   broken read exits with a distinct "the instrument is broken" code rather than
   a false clean; a moved dialog makes the writer refuse rather than guess.
+- **Typeaheads are typed, not picked.** School, company, organization and
+  issuer are filled as text; LinkedIn keeps it but may not link it to a
+  company page or logo.
+- **Adding a link to a project is proven only up to the URL box.** Past
+  "Add", LinkedIn fetches a preview and shows its own form; the writer saves
+  only if that form has exactly one Save, and the export decides.
 - **It uses LinkedIn against its terms of service.** That is your call to make.
 
 ## License

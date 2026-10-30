@@ -127,6 +127,74 @@ for (const p of m.sections?.Projects || []) {
 	out.push(fence(`project.${key}`, attrs, p.description));
 }
 
+// The other sections, from the structured export: one block per entry, with
+// its identity attribute and its description as the text. Values are left
+// out (no grade=, dates=, ...), so the bootstrap manages nothing it was not
+// asked to and drift stays clean on day one; add an attribute to manage it.
+const E = m.entities ?? {};
+const seen = new Set();
+const uniqueId = (type, name) => {
+	const base = `${type}.${slug(name) || "entry"}`;
+	let id = base;
+	for (let i = 2; seen.has(id); i++) id = `${base}-${i}`;
+	seen.add(id);
+	return id;
+};
+const section = (heading, rows, type, attrsOf, nameOf) => {
+	const usable = (rows ?? []).filter((r) => nameOf(r));
+	if (!usable.length) return;
+	out.push(`\n## ${heading}\n`);
+	for (const r of usable)
+		out.push(
+			fence(
+				uniqueId(type, nameOf(r)),
+				attrsOf(r),
+				type === "certification" ? "" : r.description,
+			),
+		);
+};
+// An education's match= is its degree when it has one (two degrees at one
+// school share the school name), else the school.
+section(
+	"Education",
+	E.educations,
+	"education",
+	(r) => ({ match: r.degree || r.school }),
+	(r) => r.degree || r.school,
+);
+section(
+	"Honors & awards",
+	E.honors,
+	"honor",
+	(r) => ({ title: r.title }),
+	(r) => r.title,
+);
+section(
+	"Publications",
+	E.publications,
+	"publication",
+	(r) => ({ title: r.title }),
+	(r) => r.title,
+);
+section(
+	"Volunteering",
+	E.volunteering,
+	"volunteer",
+	(r) => ({ match: r.organization, role: r.role }),
+	(r) => r.role,
+);
+section(
+	"Licenses & certifications",
+	E.certifications,
+	"certification",
+	(r) => ({ name: r.name }),
+	(r) => r.name,
+);
+if (E.skills?.length) {
+	out.push(`\n## Skills\n`);
+	out.push(fence("skills", {}, E.skills.map((s) => s.name).join("\n")));
+}
+
 writeFileSync(COPY_PATH, out.join("\n"), { flag: "wx" });
 console.log(`\nBootstrapped your copy-of-record at ${COPY_PATH}`);
 console.log("Edit it, then: LINKEDIN_CDP=1 node src/drift.mjs");

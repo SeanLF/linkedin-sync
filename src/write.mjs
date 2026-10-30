@@ -15,13 +15,19 @@
 //   node write.mjs headline             fill and save
 //   node write.mjs --add-skills <pos>   add a position's missing skills
 //   node write.mjs --delete-project "<title>"
+//   node write.mjs education.msc        an education / honor / publication /
+//                                       volunteer / certification block
+//   node write.mjs skills               add missing skills, delete extra ones
+//   node write.mjs --delete honor "<title>"   (or education, publication,
+//                                       volunteer, certification, skill)
+//   node write.mjs --add-link project.x attach the block's link= as media
 //
 // Run with LINKEDIN_CDP=1. After any save, prove it landed:
 //   node export.mjs && node drift.mjs   (the "saved" line is never the proof)
 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseBlocks } from "./copy-blocks.mjs";
+import { overLimit, parseBlocks } from "./copy-blocks.mjs";
 import {
 	addSkill,
 	countDialogs,
@@ -34,9 +40,42 @@ import {
 } from "./inpage.mjs";
 import { startMcp } from "./mcp.mjs";
 import { fieldsFromBlocks, MONTH_NAMES } from "./schema.mjs";
+import {
+	addLink,
+	assertFreshForCreate,
+	deleteSectionEntry,
+	unknownFlags,
+	WRITE_FLAGS,
+	withBrowser,
+	writeFormField,
+	writeSkills,
+} from "./write-sections.mjs";
+
+const args = process.argv.slice(2);
+const unknown = unknownFlags(args);
+if (unknown.length) {
+	console.error(
+		`Unknown option${unknown.length > 1 ? "s" : ""} ${unknown.join(", ")}; nothing written. Known: ${WRITE_FLAGS.join(" ")}`,
+	);
+	process.exit(1);
+}
 
 // Fields are whatever the source-of-truth file declares (id -> field def).
-const { byId: BY_ID } = fieldsFromBlocks(parseBlocks());
+const BLOCKS = parseBlocks();
+const { byId: BY_ID } = fieldsFromBlocks(BLOCKS);
+
+// LinkedIn's limits are checked before a browser opens, on the block about to
+// be written: over-long text, an attribute past its counter, a skills list
+// past 100 or a skill past 80 characters.
+function refuseOverLimit(id) {
+	const b = BLOCKS.get(id);
+	if (!b) return;
+	const problems = overLimit(new Map([[id, b]]));
+	if (!problems.length) return;
+	console.error(`Over LinkedIn's limits; nothing written:`);
+	for (const p of problems) console.error(`  ${p}`);
+	process.exit(1);
+}
 
 // Resolved from the logged-in session (or LINKEDIN_VANITY) once per run,
 // before any surface URL below is read. The URLs are getters so they pick it
@@ -101,7 +140,6 @@ const SURFACES = {
 	},
 };
 
-const args = process.argv.slice(2);
 const probe = args.includes("--probe");
 const dryRun = args.includes("--dry-run");
 const noop = args.includes("--noop"); // save the field's current text back: proves Save without changing anything visible
@@ -120,6 +158,7 @@ if (addSkillsField) {
 		console.error(`no skills list on ${addSkillsField}`);
 		process.exit(1);
 	}
+	refuseOverLimit(addSkillsField);
 	const surface = SURFACES[field.write.surface];
 	const { readFileSync } = await import("node:fs");
 	const mirror = JSON.parse(
@@ -198,12 +237,79 @@ if (addSkillsField) {
 	}
 }
 
+// --- The newer sections: forms, skills, deletes, project links ---
+// Each runs in its own browser session (write-sections.mjs) and exits here.
+const sectionMode = dryRun ? "dry" : "save";
+const delIdx = args.indexOf("--delete");
+if (delIdx !== -1) {
+	const type = args[delIdx + 1];
+	const words = args.slice(delIdx + 2).filter((a) => !a.startsWith("--"));
+	if (!type || !words.length) {
+		console.error(
+			'Usage: write.mjs [--dry-run] --delete <education|honor|publication|volunteer|certification|skill> "<title, name or match>" [role="..."]',
+		);
+		process.exit(1);
+	}
+	process.exit(
+		await withBrowser(`${sectionMode}-delete`, (ctx) =>
+			deleteSectionEntry(ctx, type, words, { dryRun }),
+		),
+	);
+}
+const linkIdx = args.indexOf("--add-link");
+if (linkIdx !== -1) {
+	const field = BY_ID.get(args[linkIdx + 1]);
+	if (!field?.linkedinTitle) {
+		console.error(
+			`--add-link takes a project block id; got ${args[linkIdx + 1]}`,
+		);
+		process.exit(1);
+	}
+	refuseOverLimit(args[linkIdx + 1]);
+	process.exit(
+		await withBrowser(`${sectionMode}-link`, (ctx) =>
+			addLink(ctx, field, { dryRun }),
+		),
+	);
+}
+{
+	const id = args.find((a) => !a.startsWith("--"));
+	const field = id ? BY_ID.get(id) : undefined;
+	if (field?.form || field?.liveSkills) {
+		if (noop) {
+			console.error(
+				"--noop is for the text fields (headline, about, a position, a project)",
+			);
+			process.exit(1);
+		}
+		refuseOverLimit(id);
+		const text = BLOCKS.get(id).text;
+		process.exit(
+			await withBrowser(
+				`${probe ? "probe" : sectionMode}-${field.form?.type ?? "skills"}`,
+				(ctx) =>
+					field.form
+						? writeFormField(ctx, field, {
+								mode: sectionMode,
+								probe,
+								description: text,
+							})
+						: writeSkills(ctx, field, {
+								dryRun,
+								desiredText: text,
+								allowMassRemove: args.includes("--allow-mass-remove"),
+							}),
+			),
+		);
+	}
+}
+
 const deleteIdx = args.indexOf("--delete-project");
 const deleteTitle = deleteIdx === -1 ? null : args[deleteIdx + 1];
 const fieldId = deleteTitle ? null : args.find((a) => !a.startsWith("--"));
 if (!fieldId && !deleteTitle) {
 	console.error(
-		'Usage: linkedin-write.mjs [--probe|--dry-run|--noop] <field-id>  |  linkedin-write.mjs [--dry-run] --delete-project "<title>"',
+		'Usage: write.mjs [--probe|--dry-run|--noop] <field-id>  |  [--dry-run] --delete-project "<title>"  |  [--dry-run] --delete <type> "<title, name or match>"  |  [--dry-run] --add-link <project-id>  |  [--dry-run] --add-skills <position-id>',
 	);
 	process.exit(1);
 }
@@ -248,7 +354,9 @@ if (deleteTitle) {
 			console.log(
 				"\nNow prove it: LINKEDIN_CDP=1 node export.mjs && node drift.mjs",
 			);
-		process.exit(0);
+		// A dry run that reached no Delete, or a delete that left the editor
+		// open, is not done.
+		process.exit((dryRun ? out.wouldClick : out.editorGone) ? 0 : 1);
 	} catch (err) {
 		console.error(`\nFailed: ${err.message}\n  screenshot, if any: ${shot}`);
 		process.exit(2);
@@ -272,6 +380,7 @@ if (!surface) {
 	console.error(`No surface "${field.write.surface}" for ${fieldId} yet`);
 	process.exit(1);
 }
+refuseOverLimit(fieldId);
 
 const SHOT = join(
 	tmpdir(),
@@ -299,6 +408,8 @@ try {
 			// must stop the run. Swallowed, it reads as "absent" and the tool adds a
 			// duplicate project on the live profile (review finding, 2026-09-12).
 			existing = field.read(mirror);
+			if (existing === undefined && !probe)
+				assertFreshForCreate(mirror, field.label);
 		}
 		if (existing !== undefined && surface.openExisting) {
 			console.log(
@@ -320,8 +431,25 @@ try {
 					await mcp.runFn(traceEditor, {}, 30000),
 				);
 		} else {
-			console.log(`Opening ${surface.url}`);
-			await mcp.callTool("browser_navigate", { url: surface.url }, 60000);
+			// A role the structured export pins down opens by deep link. The edit
+			// control's click is a navigation, and under headless that took the
+			// browser down (2026-10-29), as the project list's click did.
+			let deep;
+			if (field.positionId) {
+				const { readFileSync } = await import("node:fs");
+				try {
+					deep = field.positionId(
+						JSON.parse(
+							readFileSync(new URL("./mirror.json", import.meta.url), "utf8"),
+						),
+					);
+				} catch {}
+			}
+			const url = deep
+				? `https://www.linkedin.com/in/${VANITY}/details/experience/edit/forms/${deep}/`
+				: surface.url;
+			console.log(`Opening ${url}`);
+			await mcp.callTool("browser_navigate", { url }, 60000);
 		}
 		if (surface.open) {
 			const dialogsRaw = (await mcp.runFn(countDialogs, {}, 20000)).trim();
@@ -394,7 +522,7 @@ try {
 			process.exit(0);
 		}
 
-		const desired = noop ? null : parseBlocks().get(fieldId)?.text;
+		const desired = noop ? null : BLOCKS.get(fieldId)?.text;
 		if (!noop && !desired)
 			throw new Error(
 				`your source-of-truth file has no block for "${fieldId}"`,
@@ -437,6 +565,16 @@ try {
 				titleLabel: surface.titleLabel,
 				notifySwitch: surface.notifySwitch,
 				dates: field.dates,
+				dateLabels: field.write.dateLabels ?? null,
+				// A role's company, when the block carries company="..."
+				extra: field.write.companyTo
+					? [
+							{
+								pattern: "^Company or organization",
+								value: field.write.companyTo,
+							},
+						]
+					: null,
 				editing: existing !== undefined,
 				monthNames: MONTH_NAMES,
 			},
@@ -458,7 +596,14 @@ try {
 			`  before: ${out.beforeLength} chars  after: ${out.afterLength} chars  matches desired: ${out.matches}`,
 		);
 		if (out.dates)
-			console.log(`  dates read back: ${JSON.stringify(out.dates)}`);
+			console.log(
+				`  dates read back: ${JSON.stringify(out.dates)}${out.datesWanted ? (out.datesMatch ? " (as the record)" : `  WANTED ${JSON.stringify(out.datesWanted)}`) : ""}`,
+			);
+		if (out.extra)
+			for (const x of out.extra)
+				console.log(
+					`  /${x.pattern}/ reads ${JSON.stringify(x.got)}${x.got === x.want ? "" : `  WANTED ${JSON.stringify(x.want)}`}`,
+				);
 		if (!out.matches && out.after)
 			console.log(`  field reads: ${JSON.stringify(out.after)}`);
 		console.log(
@@ -468,7 +613,18 @@ try {
 			console.log(
 				"\nNow prove it: LINKEDIN_CDP=1 node export.mjs && node drift.mjs",
 			);
-		process.exit(out.matches ? 0 : 1);
+		// A save that left the dialog open did not save (LinkedIn's validation
+		// keeps it up), unless headless closed the page, where the export decides.
+		const closed =
+			mode === "dry" || out.dialogGone || Boolean(out.pageClosedAfterSave);
+		process.exit(
+			out.matches &&
+				out.datesMatch !== false &&
+				out.extraMatch !== false &&
+				closed
+				? 0
+				: 1,
+		);
 	} catch (err) {
 		console.error(`\nFailed: ${err.message}\n  screenshot, if any: ${SHOT}`);
 		process.exitCode = 2;

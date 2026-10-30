@@ -25,7 +25,14 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { isCompared, normalize, TYPE_LIMITS, typeOf } from "./schema.mjs";
+import {
+	attrProblems,
+	isCompared,
+	isKnownType,
+	normalize,
+	TYPE_LIMITS,
+	typeOf,
+} from "./schema.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const COPY_PATH =
@@ -85,7 +92,9 @@ export function parseBlocks(path = COPY_PATH) {
 		if (line.trimEnd() === "```") {
 			if (blocks.has(id))
 				throw new Error(`${path}:${openedAt}: duplicate block "${id}"`);
-			if (!TYPE_LIMITS[typeOf(id)]) {
+			// Known-ness is membership, not a truthy limit: a certification's
+			// limit is 0 (no description) and skills has none.
+			if (!isKnownType(typeOf(id))) {
 				throw new Error(
 					`${path}:${openedAt}: block "${id}" has an unknown type "${typeOf(id)}" (known: ${Object.keys(TYPE_LIMITS).join(", ")})`,
 				);
@@ -106,11 +115,16 @@ export function parseBlocks(path = COPY_PATH) {
 export function overLimit(blocks) {
 	const problems = [];
 	for (const [id, b] of blocks) {
+		problems.push(...attrProblems(id, b.attrs, b.text));
 		const limit = TYPE_LIMITS[typeOf(id)];
-		if (!limit) continue;
+		if (typeof limit !== "number") continue;
 		const n = [...normalize(b.text)].length;
 		if (n > limit)
-			problems.push(`${id}: ${n} chars, limit ${limit} (over by ${n - limit})`);
+			problems.push(
+				limit === 0
+					? `${id}: a ${typeOf(id)} has no description; leave the block empty`
+					: `${id}: ${n} chars, limit ${limit} (over by ${n - limit})`,
+			);
 	}
 	return problems;
 }
@@ -145,6 +159,26 @@ function selfTest() {
 			"escaped quote ok",
 			'```linkedin:project.x title="a \\"b\\" c"\nfine\n```\n',
 			null,
+		],
+		[
+			"grade over 80",
+			`\`\`\`linkedin:education.x match="BSc" grade="${"g".repeat(81)}"\n\`\`\`\n`,
+			/grade= is 81 chars, limit 80/,
+		],
+		[
+			"text on a certification",
+			'```linkedin:certification.x name="Diver"\nsome text\n```\n',
+			/no description/,
+		],
+		[
+			"empty certification ok",
+			'```linkedin:certification.x name="Diver" credential=""\n```\n',
+			null,
+		],
+		[
+			"skill over 80",
+			`\`\`\`linkedin:skills\nSQL\n${"s".repeat(81)}\n\`\`\`\n`,
+			/over 80 chars/,
 		],
 		["clean", "```linkedin:headline\nfine\n```\n", null],
 	];
@@ -217,7 +251,8 @@ function main() {
 
 	for (const [id, b] of blocks) {
 		const n = countChars(b.text);
-		const limit = TYPE_LIMITS[typeOf(id)] ? `/${TYPE_LIMITS[typeOf(id)]}` : "";
+		const t = TYPE_LIMITS[typeOf(id)];
+		const limit = typeof t === "number" ? `/${t}` : "";
 		const note = isCompared(id, b.attrs) ? "" : "  (not compared)";
 		console.log(`${id.padEnd(24)} ${String(n).padStart(5)}${limit}${note}`);
 	}
