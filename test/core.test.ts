@@ -261,6 +261,34 @@ it.describe("write safety", () => {
 	});
 });
 
+it.describe("review findings", () => {
+	it("an empty project or position block whose entry is missing is absent, not a match", () => {
+		expect(verdicts(fence('project.n title="Not there"'))["project.n"]).toBe(
+			"absent",
+		);
+		expect(verdicts(fence('project.w title="Widget"'))["project.w"]).toBe(
+			"match",
+		);
+		expect(
+			verdicts(fence('position.x match="Nowhere Inc"'))["position.x"],
+		).toBe("absent");
+	});
+	it("no Projects section is 'none' when the full collection read is empty, so the first one can be created", () => {
+		const none = mirror();
+		delete none.sections.Projects;
+		none.entities.projects = [];
+		const f = fieldFor(
+			record(fence('project.n title="First"', "Text.")).get(
+				"project.n",
+			) as never,
+		);
+		expect(compareField(f, none)[0]?.verdict).toBe("absent");
+		expect(f.editor?.(none).creating).toBe(true);
+		delete none.entities.projects; // and not when the collection could not be read
+		expect(compareField(f, none)[0]?.verdict).toBe("unreadable");
+	});
+});
+
 it("init writes a record that matches the profile it came from", () => {
 	const m = mirror();
 	const results = compared(record(bootstrapText(m, "2026-01-01"))).flatMap(

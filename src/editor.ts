@@ -8,7 +8,7 @@
 // re-export and drift; a dialog that closed is not the proof.
 
 import { expect, type Locator, type Page } from "@playwright/test";
-import type { Control, Editor, Step } from "./fields.ts";
+import { type Control, type Editor, escapeRe, type Step } from "./fields.ts";
 
 export type Mode = "save" | "dry" | "noop" | "probe";
 
@@ -25,7 +25,6 @@ export const TIMEOUTS = {
 /** A refusal: nothing was saved. */
 export class Refused extends Error {}
 
-const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 /** What an editor can change on its own: CRs, NBSPs, trailing spaces, and how many newlines a break reads as. */
 const norm = (v: string) =>
 	v
@@ -202,6 +201,12 @@ async function assertQuiet(dialog: Locator, ed: Editor): Promise<string> {
 
 /** Click Save and wait for the editor to close. Under headless the page can close on Save while the write lands; the export decides. */
 async function save(page: Page, dialog: Locator): Promise<string> {
+	// Every Save, whichever flow led here: never with the share switch on.
+	for (const sw of await dialog.getByRole("switch").all())
+		if (await sw.isChecked())
+			throw new Refused(
+				'"Share with your network" is ON in this editor; not saving. Turn it off by hand first.',
+			);
 	await dialog.getByRole("button", { name: "Save", exact: true }).click();
 	try {
 		await dialog.waitFor({ state: "hidden", timeout: TIMEOUTS.close });

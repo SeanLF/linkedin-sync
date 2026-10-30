@@ -32,6 +32,7 @@ import { exportProfile } from "./export.ts";
 import {
 	deleteEditor,
 	type Editor,
+	escapeRe,
 	type Field,
 	type FormType,
 	fieldFor,
@@ -186,10 +187,7 @@ const skillEditor = (name: string): Editor => ({
 	path: "",
 	creating: false,
 	// The skill editor's heading is "Edit <skill>": that is its identity check.
-	heading: new RegExp(
-		`^Edit ${name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}$`,
-		"iu",
-	),
+	heading: new RegExp(`^Edit ${escapeRe(name)}$`, "iu"),
 	identity: [],
 	steps: [],
 	notify: "if-present",

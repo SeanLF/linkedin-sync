@@ -9,10 +9,11 @@
 
 import { readFileSync, writeFileSync } from "node:fs";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { ageDays } from "./dates.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const MIRROR_PATH = process.env["LINKEDIN_MIRROR"] ?? `${ROOT}mirror.json`;
 const LAST_WRITE_PATH = `${ROOT}last-write.json`;
 

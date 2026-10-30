@@ -4,7 +4,13 @@
 // rendered twice, a Discard prompt, a separate delete confirmation).
 
 import { expect, test as it, type Page } from "@playwright/test";
-import { Refused, runDelete, runEditor, TIMEOUTS } from "../src/editor.ts";
+import {
+	Refused,
+	runAddSkill,
+	runDelete,
+	runEditor,
+	TIMEOUTS,
+} from "../src/editor.ts";
 import type { Editor } from "../src/fields.ts";
 
 interface Shape {
@@ -235,4 +241,27 @@ it("delete: refuses another entry's editor before pressing anything", async ({
 		/the wrong entry/u,
 	);
 	expect(await deleted(page)).toBe(false);
+});
+
+it("adding a skill refuses to save with the share switch on", async ({
+	page,
+}) => {
+	await page.setContent(`<!doctype html><meta charset="utf-8">
+<div role="dialog" id="ed"><h2>Add skill</h2>
+	<span role="switch" aria-checked="true" aria-label="Notify network"></span>
+	<label for="k">Skill*</label><input id="k">
+	<ul role="listbox" id="opts"></ul>
+	<button aria-label="Dismiss">x</button><button id="save">Save</button>
+</div>
+<script>
+	window.saved = null;
+	k.oninput = () => {
+		opts.innerHTML = k.value === "Rust" ? '<li role="option" id="o">Rust</li>' : "";
+		const o = document.getElementById("o");
+		if (o) o.onclick = () => { k.value = "Rust"; };
+	};
+	save.onclick = () => { window.saved = k.value; ed.remove(); };
+</script>`);
+	await expect(runAddSkill(page, "Rust", false)).rejects.toThrow(/is ON/u);
+	expect(await saved(page)).toBeNull();
 });

@@ -9,6 +9,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { z } from "zod";
 import { connect } from "./browser.ts";
@@ -53,7 +54,7 @@ async function exportCommand(args: string[]): Promise<number> {
 			return 0;
 		}
 		const rows = await exportConnections(s.api);
-		const path = new URL("../connections.csv", import.meta.url).pathname;
+		const path = fileURLToPath(new URL("../connections.csv", import.meta.url));
 		const before = existsSync(path)
 			? readFileSync(path, "utf8").trim().split("\n").length
 			: 0;
@@ -181,7 +182,9 @@ const COMMANDS: Record<string, (args: string[]) => Promise<number>> = {
 	mcp: () => {
 		serve();
 		// Runs until the client closes stdin.
-		return new Promise<number>(() => undefined);
+		return new Promise<number>((done) =>
+			process.stdin.once("close", () => done(0)),
+		);
 	},
 };
 

@@ -84,7 +84,9 @@ export interface Field {
 }
 
 const lc = (s: string | undefined) => (s ?? "").toLowerCase();
-const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+/** A string as a literal regex. */
+export const escapeRe = (s: string): string =>
+	s.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 const anyCase = (s: string) => new RegExp(escapeRe(s), "iu");
 const orNone = (v: string | undefined) => (v ? v : NONE);
 const label = (pattern: string, nth = 0): Control => ({
@@ -215,8 +217,13 @@ function positionField(b: Block): Field {
 		id: b.id,
 		type: "position",
 		label: `Position (${role ? `${role} at ` : ""}${match})`,
-		desired: b.text,
-		read: (m) => experienceByCompany(m, rx, role)?.description,
+		// An empty block compares the role's presence: "both empty" must not hide a missing role.
+		desired: b.text.trim() ? b.text : PRESENT,
+		read: (m) => {
+			const r = experienceByCompany(m, rx, role);
+			if (!r) return;
+			return b.text.trim() ? r.description : PRESENT;
+		},
 		facets,
 		editor: (m) => {
 			const e = entity(m);
@@ -259,8 +266,9 @@ function roleDates(d: Range, verb: string, start: string, end: string): Step[] {
 
 function projectField(b: Block): Field {
 	const { title = "", dates, link } = b.attrs;
-	const shown = (m: Mirror) =>
-		section(m, "Projects").find((p) => p.title === title);
+	// The page has no Projects section at all when there are none: that is
+	// "none" only if the full collection read says so, else it is unreadable.
+	const shown = (m: Mirror) => projectsShown(m).find((p) => p.title === title);
 	const record = (m: Mirror) =>
 		onlyOne(
 			entities(m, "projects").filter((p) => p.title === title),
@@ -311,8 +319,13 @@ function projectField(b: Block): Field {
 		id: b.id,
 		type: "project",
 		label: `Project: ${title}`,
-		desired: b.text,
-		read: (m) => shown(m)?.description,
+		// An empty block compares the project's presence, as a section entry's does.
+		desired: b.text.trim() ? b.text : PRESENT,
+		read: (m) => {
+			const r = shown(m);
+			if (!r) return;
+			return b.text.trim() ? r.description : PRESENT;
+		},
 		facets,
 		project: { title, urls, ...(link === undefined ? {} : { link }) },
 		editor: (m) => {
@@ -349,6 +362,15 @@ function projectField(b: Block): Field {
 	};
 }
 
+/**
+ * The rendered projects. The page has no Projects section when there are
+ * none: that is "none" only if the full collection read agrees, else unreadable.
+ */
+const projectsShown = (m: Mirror): Item[] =>
+	m.sections.Projects === undefined && m.entities.projects?.length === 0
+		? []
+		: section(m, "Projects");
+
 /** Media health, for a project with media: links LinkedIn could not preview, and dead ones under --check-links. */
 export function mediaFacet(
 	f: Field,
@@ -362,7 +384,7 @@ export function mediaFacet(
 		unwritten: true,
 		optional: true,
 		read: (m) => {
-			const r = section(m, "Projects").find((x) => x.title === p.title);
+			const r = projectsShown(m).find((x) => x.title === p.title);
 			const urls = p.urls(m);
 			if (!(r && (urls.length || r.media?.length))) return;
 			const problems = [

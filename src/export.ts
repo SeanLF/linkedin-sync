@@ -10,7 +10,7 @@
 
 import { writeFileSync } from "node:fs";
 import { z } from "zod";
-import type { Session, Voyager } from "./browser.ts";
+import { type Session, StopError, type Voyager } from "./browser.ts";
 import {
 	ENTITIES,
 	type EntityKind,
@@ -475,7 +475,7 @@ const Elements = z.object({
 async function readExperience(plcs: Plcs, warnings: string[]): Promise<Item[]> {
 	const all = await plcs("experience");
 	const main = all.find((p) => p.decorationType === "LINE_SEPARATED");
-	if (!main) return [];
+	if (!main) throw new Error("no experience list in the response");
 	const entries = parseElements(main.components?.elements ?? []);
 	// The group id sits in keys the schema does not keep, so search the raw record.
 	const raw = Elements.parse(main.raw).components.elements.map((el) =>
@@ -559,7 +559,8 @@ export async function exportProfile(
 		try {
 			return await read();
 		} catch (err) {
-			if (!(err instanceof Error)) throw err;
+			// A stop (429) ends the export: more requests after "stop" make it worse.
+			if (!(err instanceof Error) || err instanceof StopError) throw err;
 			const why = `${what}: ${err.message.split("\n")[0]}`;
 			warnings.push(why);
 			log(`  ${why}`);
@@ -632,9 +633,14 @@ export async function exportProfile(
 			),
 		].filter(([, v]) => v !== undefined),
 	);
+	// Without it the headline would read as empty: stale, when the read is what broke.
+	if (!me)
+		throw new Error(
+			"your own profile record is not in the response; the cards query may have rotated",
+		);
 	return Mirror.parse({
-		name: me ? `${me.firstName} ${me.lastName}` : vanity,
-		headline: me?.headline ?? "",
+		name: `${me.firstName} ${me.lastName}`,
+		headline: me.headline ?? "",
 		vanityName: vanity,
 		profileUrn,
 		exportedAt: new Date().toISOString(),

@@ -9,6 +9,7 @@ import { homedir } from "node:os";
 import process from "node:process";
 import {
 	type APIRequestContext,
+	type Browser,
 	type BrowserContext,
 	chromium,
 	expect,
@@ -123,6 +124,16 @@ export async function connect(): Promise<Session> {
 	const browser = await chromium.connectOverCDP(`http://127.0.0.1:${PORT}`, {
 		noDefaults: true,
 	});
+	try {
+		return await session(browser);
+	} catch (err) {
+		// A refusal here (signed out) must not leave the CDP socket holding the process open.
+		await browser.close();
+		throw err;
+	}
+}
+
+async function session(browser: Browser): Promise<Session> {
 	const context = browser.contexts()[0];
 	if (!context) throw new Error("the CDP Chrome has no browser context");
 	const csrf = (await context.cookies(ORIGIN))
