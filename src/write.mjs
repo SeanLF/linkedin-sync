@@ -61,17 +61,17 @@ import {
 	traceEditor,
 } from "./inpage.mjs";
 import { startMcp } from "./mcp.mjs";
-import {
-	fieldsFromBlocks,
-	MIRROR_MAX_AGE_DAYS,
-	MONTH_NAMES,
-	mirrorAgeDays,
-} from "./schema.mjs";
+import { fieldsFromBlocks, MONTH_NAMES, mirrorAgeDays } from "./schema.mjs";
 import {
 	addLink,
-	assertFreshForCreate,
+	conflictingFlags,
 	deleteSectionEntry,
 	failureShot,
+	fieldIds,
+	LAST_WRITE,
+	maxAgeDays,
+	projectPresent,
+	readLastWrite,
 	removeMedia,
 	shotPath,
 	step,
@@ -83,10 +83,11 @@ import {
 } from "./write-sections.mjs";
 
 const MIRROR = new URL("./mirror.json", import.meta.url);
-// When the last save started. --all-drift refuses a mirror older than this:
-// an entry created since the export still reads as absent, and writing it
-// again would add a duplicate.
-const LAST_WRITE = new URL("./last-write.json", import.meta.url);
+// When the last save before this run started. --all-drift and every create
+// refuse a mirror older than this: an entry created since the export still
+// reads as absent, and writing it again would add a duplicate. Read once,
+// here, because this run records its own write before its first save.
+const PRIOR_WRITE = readLastWrite();
 const readMirror = () => JSON.parse(readFileSync(MIRROR, "utf8"));
 const at = (vanity, path) => `https://www.linkedin.com/in/${vanity}/${path}`;
 
@@ -96,6 +97,15 @@ if (unknown.length) {
 	console.error(
 		`Unknown option${unknown.length > 1 ? "s" : ""} ${unknown.join(", ")}; nothing written. Known: ${WRITE_FLAGS.join(" ")}`,
 	);
+	process.exit(1);
+}
+const conflict = conflictingFlags(args);
+let MAX_AGE_DAYS;
+try {
+	if (conflict) throw new Error(conflict);
+	MAX_AGE_DAYS = maxAgeDays(args);
+} catch (err) {
+	console.error(`${err.message}; nothing written.`);
 	process.exit(1);
 }
 
@@ -171,7 +181,11 @@ const emit = json
 	: () => {};
 if (json) console.log = (...a) => console.error(...a);
 const sectionMode = dryRun ? "dry" : "save";
-const session = (fn) => withBrowser(fn, { screenshots });
+// Every step sees the write recorded before this run, not the one it records.
+const session = (fn) =>
+	withBrowser((ctx) => fn(Object.assign(ctx, { lastWrite: PRIOR_WRITE })), {
+		screenshots,
+	});
 
 let wrote = false;
 function markWrite(what) {
@@ -254,12 +268,17 @@ async function writeTextField({ mcp, vanity, shot, pageShot }, field) {
 	let mirror;
 	if (field.write.createIfAbsent) {
 		mirror = readMirror();
-		// No catch: a shape error here (Projects section missing from the mirror)
-		// must stop the run. Swallowed, it reads as "absent" and the tool adds a
-		// duplicate project on the live profile (review finding, 2026-09-12).
-		existing = field.read(mirror);
-		if (existing === undefined && !probe)
-			assertFreshForCreate(mirror, field.label);
+		// No catch: a shape error here (Projects missing from the mirror, or only
+		// partly read) must stop the run. Swallowed, it reads as "absent" and the
+		// tool adds a duplicate project on the live profile (review findings,
+		// 2026-09-12 and 2026-10-29). Present in either read is present, even
+		// with no description: that is an edit, never a create.
+		existing = projectPresent(mirror, field.linkedinTitle, {
+			probe,
+			lastWrite: PRIOR_WRITE,
+		})
+			? (field.read(mirror) ?? "")
+			: undefined;
 	}
 	const editingProject = existing !== undefined && surface.openExisting;
 
@@ -488,18 +507,14 @@ function driftIds() {
 		return 2;
 	}
 	const age = mirrorAgeDays(mirror);
-	const maxIdx = args.indexOf("--max-age-days");
-	const maxAge = maxIdx === -1 ? MIRROR_MAX_AGE_DAYS : Number(args[maxIdx + 1]);
+	const maxAge = MAX_AGE_DAYS;
 	if (age === null || age > maxAge) {
 		console.error(
 			`--all-drift: the mirror is ${age === null ? "of unknown age" : `${age.toFixed(1)} days old (limit ${maxAge})`}; re-export first: LINKEDIN_CDP=1 node src/export.mjs`,
 		);
 		return 2;
 	}
-	let last = null;
-	try {
-		last = JSON.parse(readFileSync(LAST_WRITE, "utf8"));
-	} catch {}
+	const last = PRIOR_WRITE;
 	if (last && Date.parse(last.at) > Date.parse(mirror.exportedAt)) {
 		console.error(
 			`--all-drift: the mirror (${mirror.exportedAt}) predates the last write (${last.at}). An entry created since reads as absent and would be created twice. Re-export first: LINKEDIN_CDP=1 node src/export.mjs`,
@@ -781,10 +796,7 @@ async function main() {
 	}
 
 	// Fields: every bare argument (not a flag's value), then --all-drift's.
-	const valued = new Set(["--max-age-days"]);
-	const ids = args.filter(
-		(a, i) => !a.startsWith("--") && !valued.has(args[i - 1]),
-	);
+	const ids = fieldIds(args);
 	if (args.includes("--all-drift")) {
 		const more = driftIds();
 		if (typeof more === "number") return more;

@@ -75,6 +75,47 @@ const collectEntities = async (fetchPage, type, toRow) => {
 	}
 };
 
+// One rendered section's PagedListComponent, every page of it, or throw.
+// Like collectEntities, a short read must never pass as complete: Projects
+// read here is what the project writer checks before adding one, so a page
+// that failed, or fewer elements than paging.total, throws and export leaves
+// the section out of the mirror (unreadable, the reason in warnings) rather
+// than writing a partial list a create would take as "absent". Counts the
+// elements fetched, not the items kept: skills share `seen` across category
+// lists, so a skill in two categories is dropped from the second on purpose.
+// fetchPage(start) -> the normalized+json response for that page.
+const paginatePlc = async (plc, fetchPage, parse, seen = new Set()) => {
+	const elements = plc.components?.elements || [];
+	const total = plc.components?.paging?.total || elements.length;
+	const items = [];
+	const keep = (els) => {
+		for (const item of parse(els)) {
+			const key = `${item.title}|${item.dates || ""}`;
+			if (!seen.has(key)) {
+				seen.add(key);
+				items.push(item);
+			}
+		}
+	};
+	keep(elements);
+	let fetched = elements.length;
+	if (fetched < total && !plc.entityUrn)
+		throw new Error(`read ${fetched} of ${total}; no list urn to page with`);
+	while (fetched < total) {
+		const page = await fetchPage(fetched);
+		if (page?.failed)
+			throw new Error(`read ${fetched} of ${total}; a page failed`);
+		const els =
+			page?.data?.data?.identityDashProfileComponentsByPagedListComponent
+				?.elements || [];
+		if (els.length === 0)
+			throw new Error(`read ${fetched} of ${total}; a page came back empty`);
+		keep(els);
+		fetched += els.length;
+	}
+	return { items, total };
+};
+
 (async () => {
 	try {
 		const csrf = document.cookie.match(/JSESSIONID="?([^";]+)/)?.[1];
@@ -211,49 +252,17 @@ const collectEntities = async (fetchPage, type, toRow) => {
 			);
 		};
 
-		const dedupKey = (item) => `${item.title}|${item.dates || ""}`;
-
-		const dedupInto = (items, seen, newItems) => {
-			for (const item of newItems) {
-				const key = dedupKey(item);
-				if (!seen.has(key)) {
-					seen.add(key);
-					items.push(item);
-				}
-			}
-		};
-
-		// Paginate a single PLC, collecting parsed items with dedup
-		const paginatePlc = async (plc, seen = new Set()) => {
-			const elements = plc.components?.elements || [];
-			const paging = plc.components?.paging || {};
-			const total = paging.total || elements.length;
-
-			const items = [];
-			dedupInto(items, seen, parseElements(elements));
-
-			if (elements.length < total && plc.entityUrn) {
-				const plcUrn = encodePlcUrn(plc.entityUrn);
-				let start = elements.length;
-				while (start < total) {
-					const page = await get(
-						`/voyager/api/graphql?variables=(start:${start},count:20,paginationToken:null,pagedListComponent:${plcUrn})&queryId=${QUERY_IDS.SECTION_PAGE}`,
-					);
-					const els =
-						page.data?.data?.identityDashProfileComponentsByPagedListComponent
-							?.elements || [];
-					if (els.length === 0) break;
-					const before = items.length;
-					dedupInto(items, seen, parseElements(els));
-					console.log(
-						`    page start:${start} -> ${els.length} elements, ${items.length - before} new`,
-					);
-					start += els.length;
-				}
-			}
-
-			return { items, total };
-		};
+		// Paginate a single PLC (see paginatePlc above); a partial read throws.
+		const pagePlc = (plc, seen) =>
+			paginatePlc(
+				plc,
+				(start) =>
+					get(
+						`/voyager/api/graphql?variables=(start:${start},count:20,paginationToken:null,pagedListComponent:${encodePlcUrn(plc.entityUrn)})&queryId=${QUERY_IDS.SECTION_PAGE}`,
+					),
+				parseElements,
+				seen,
+			);
 
 		// --- Step 1: Profile URN ---
 		console.log("Fetching profile URN...");
@@ -304,7 +313,7 @@ const collectEntities = async (fetchPage, type, toRow) => {
 				plcs.find((p) => p.decorationType === "LINE_SEPARATED") || plcs[0];
 			if (!plc) return [];
 
-			const { items, total } = await paginatePlc(plc);
+			const { items, total } = await pagePlc(plc);
 			console.log(`  ${sectionType}: ${items.length}/${total}`);
 			return items;
 		};
@@ -362,7 +371,7 @@ const collectEntities = async (fetchPage, type, toRow) => {
 			const allSkills = [];
 			const seen = new Set();
 			for (const plc of plcs) {
-				const { items } = await paginatePlc(plc, seen);
+				const { items } = await pagePlc(plc, seen);
 				allSkills.push(...items);
 			}
 			console.log(
@@ -524,13 +533,18 @@ const collectEntities = async (fetchPage, type, toRow) => {
 		const [experience, skills, recs, entities, ...sectionResults] =
 			await Promise.all([
 				fetchExperience(),
-				fetchSkills(),
+				fetchSkills().catch((err) => {
+					warnings.push(`sections.Skills: ${err.message}`);
+					return null;
+				}),
 				fetchRecommendations(),
 				fetchAllEntities(),
 				...Object.entries(SECTION_SLUGS).map(([name, slug]) =>
 					fetchPagedList(slug, name)
 						.then((items) => ({ name, items }))
 						.catch((err) => {
+							// Left out of the mirror, so it reads as unreadable, never empty.
+							warnings.push(`sections.${name}: ${err.message}`);
 							console.warn(`  ${name} failed, skipping:`, err.message);
 							return null;
 						}),
@@ -551,7 +565,7 @@ const collectEntities = async (fetchPage, type, toRow) => {
 		if (textSections.Causes) profile.sections.Causes = textSections.Causes;
 
 		profile.sections.Experience = experience;
-		profile.sections.Skills = skills;
+		if (skills) profile.sections.Skills = skills;
 		if (Object.keys(recs).length) profile.sections.Recommendations = recs;
 
 		for (const result of sectionResults) {

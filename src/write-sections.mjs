@@ -59,17 +59,118 @@ export const WRITE_FLAGS = [
 export const unknownFlags = (args) =>
 	args.filter((a) => a.startsWith("--") && !WRITE_FLAGS.includes(a));
 
+// The flags that pick a command other than "write these fields". None of them
+// has a read-only mode for --probe or a re-save for --noop, so either with one
+// of them is refused: ignored, the command would run and save for real.
+export const MODE_FLAGS = [
+	"--delete",
+	"--add-skills",
+	"--add-link",
+	"--remove-media",
+	"--delete-project",
+];
+/** Why these arguments are refused before anything runs, or null. */
+export function conflictingFlags(args) {
+	const modes = MODE_FLAGS.filter((f) => args.includes(f));
+	const readOnly = ["--probe", "--noop"].filter((f) => args.includes(f));
+	if (modes.length && readOnly.length)
+		return `${readOnly.join(" and ")} cannot go with ${modes.join(", ")} (it would run for real); use --dry-run`;
+	return null;
+}
+
+/**
+ * --max-age-days N, or the default when it is absent. A missing or
+ * non-numeric N throws: Number(undefined) is NaN, and `age > NaN` is false,
+ * so a bad value would have switched the age guard off.
+ */
+export function maxAgeDays(args) {
+	const i = args.indexOf("--max-age-days");
+	if (i === -1) return MIRROR_MAX_AGE_DAYS;
+	const v = args[i + 1];
+	if (v === undefined || !/^\d+(\.\d+)?$/.test(v))
+		throw new Error(
+			`--max-age-days takes a number of days; got ${v === undefined ? "nothing" : JSON.stringify(v)}`,
+		);
+	return Number(v);
+}
+
+/**
+ * The field ids in the arguments: every bare one that is not a flag's value,
+ * each once. A field named twice in one batch would be written twice, and a
+ * create twice is a duplicate entry.
+ */
+export function fieldIds(args) {
+	const valued = new Set(["--max-age-days"]);
+	return [
+		...new Set(
+			args.filter((a, i) => !a.startsWith("--") && !valued.has(args[i - 1])),
+		),
+	];
+}
+
+// When the last save started (write.mjs records it before any save runs).
+export const LAST_WRITE = new URL("./last-write.json", import.meta.url);
+/** The last recorded write, or null when there is none. */
+export function readLastWrite() {
+	try {
+		return JSON.parse(readFileSync(LAST_WRITE, "utf8"));
+	} catch {
+		return null;
+	}
+}
+
 /**
  * Throw unless the mirror is fresh enough to say an entry is absent. Creating
  * is the one write a stale or partial mirror turns into damage: an entry added
  * by hand since the export reads as missing, and the writer adds it again.
+ * The same holds for a save this tool made after the export: a run that
+ * crashed after its create landed, rerun on the old mirror, creates it twice.
+ * `lastWrite` is the write recorded before this run started; write.mjs passes
+ * it in, since its own run records a new one before the first save.
  */
-export function assertFreshForCreate(mirror, what) {
+export function assertFreshForCreate(
+	mirror,
+	what,
+	lastWrite = readLastWrite(),
+) {
 	const age = mirrorAgeDays(mirror);
 	if (age === null || age > MIRROR_MAX_AGE_DAYS)
 		throw new Error(
 			`${what} is not in the mirror, but the mirror is ${age === null ? "of unknown age" : `${age.toFixed(1)} days old`} (limit ${MIRROR_MAX_AGE_DAYS}); not creating it from a stale read. Re-export first.`,
 		);
+	const last = Date.parse(lastWrite?.at ?? "");
+	if (last > Date.parse(mirror.exportedAt))
+		throw new Error(
+			`${what} is not in the mirror, but the mirror (${mirror.exportedAt}) predates the last write (${lastWrite.at}); it may have landed since. Not creating it twice. Re-export first.`,
+		);
+}
+
+/**
+ * Whether a project is on LinkedIn, for the writer that edits it or adds it.
+ * Present in either read (the rendered list or the structured one) is present,
+ * whatever its description says. Absent is only said by both reads in full and
+ * a fresh mirror; anything less throws rather than add a duplicate.
+ */
+export function projectPresent(
+	mirror,
+	title,
+	{ probe = false, lastWrite } = {},
+) {
+	const shown = mirror?.sections?.Projects;
+	const rows = mirror?.entities?.projects;
+	if (!Array.isArray(shown))
+		throw new Error(
+			"sections.Projects missing from the mirror (the export could not read all of it; see its warnings). Re-export.",
+		);
+	if (shown.some((p) => p?.title === title)) return true;
+	if (Array.isArray(rows) && rows.some((p) => p?.title === title)) return true;
+	if (probe) return false;
+	if (!Array.isArray(rows))
+		throw new Error(
+			`"${title}" is not in sections.Projects, but entities.projects is missing from the mirror, so absence is unproven. Not creating it. Re-export.`,
+		);
+	assertFreshForCreate(mirror, `Project: ${title}`, lastWrite);
+	return false;
 }
 
 // A save is done when its dialog closed. Headless can report the page closed
@@ -148,7 +249,7 @@ function printResults(out) {
 
 /** Write one education / honour / publication / volunteer / certification block. */
 export async function writeFormField(
-	{ mcp, vanity, shot, pageShot, mirror = readMirror() },
+	{ mcp, vanity, shot, pageShot, mirror = readMirror(), lastWrite },
 	field,
 	{ mode, probe, description },
 ) {
@@ -157,7 +258,7 @@ export async function writeFormField(
 	// duplicate entry on the live profile.
 	const entry = field.form.locate(mirror);
 	const creating = entry === undefined;
-	if (creating && !probe) assertFreshForCreate(mirror, field.label);
+	if (creating && !probe) assertFreshForCreate(mirror, field.label, lastWrite);
 	const target = at(
 		vanity,
 		creating ? field.form.newPath : field.form.editorPath(entry.id),
@@ -231,7 +332,7 @@ export async function writeFormField(
  * like), and an empty one always is.
  */
 export async function writeSkills(
-	{ mcp, vanity, pageShot, mirror = readMirror() },
+	{ mcp, vanity, pageShot, mirror = readMirror(), lastWrite },
 	field,
 	{ dryRun, desiredText, allowMassRemove },
 ) {
@@ -266,6 +367,9 @@ export async function writeSkills(
 		);
 		return 1;
 	}
+	// An add is a create: a rerun on a mirror older than the last save adds again.
+	if (plan.add.length)
+		assertFreshForCreate(mirror, `skills ${plan.add.join(", ")}`, lastWrite);
 	const bad = [];
 	for (const skill of plan.add) {
 		await mcp.callTool(
@@ -400,7 +504,7 @@ export async function deleteSectionEntry(
 
 /** Attach the block's link= to its project as a link media item. */
 export async function addLink(
-	{ mcp, vanity, shot, pageShot, mirror = readMirror() },
+	{ mcp, vanity, shot, pageShot, mirror = readMirror(), lastWrite },
 	field,
 	{ dryRun },
 ) {
@@ -420,6 +524,12 @@ export async function addLink(
 		throw new Error(
 			`"${field.linkedinTitle}" is not on LinkedIn yet; write the project first`,
 		);
+	// Adding a media item is a create: a rerun after a crash adds it twice.
+	assertFreshForCreate(
+		mirror,
+		`${field.link} on "${field.linkedinTitle}"`,
+		lastWrite,
+	);
 	const target = at(vanity, `details/projects/edit/forms/${p.id}/`);
 	console.log(`Opening ${target}`);
 	await mcp.callTool("browser_navigate", { url: target }, 60000);
