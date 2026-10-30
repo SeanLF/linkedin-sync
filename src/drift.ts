@@ -13,15 +13,16 @@ import {
 	PRESENT,
 	planSkills,
 } from "./fields.ts";
-import { MAX_AGE_DAYS, type Mirror, mirrorAge } from "./mirror.ts";
-import { type Block, countChars, isCompared, normalize } from "./record.ts";
+import { MAX_AGE_DAYS, type Mirror, mirrorAge, readMirror } from "./mirror.ts";
+import {
+	type Block,
+	countChars,
+	isCompared,
+	normalize,
+	readRecord,
+} from "./record.ts";
 
-export type Verdict =
-	| "match"
-	| "drift"
-	| "absent"
-	| "no-desired"
-	| "unreadable";
+type Verdict = "match" | "drift" | "absent" | "no-desired" | "unreadable";
 export interface Result {
 	id: string;
 	verdict: Verdict;
@@ -136,7 +137,8 @@ export function staleMirror(
 	const age = mirrorAge(m);
 	if (age === null)
 		return "the mirror has no readable exportedAt, so its freshness is unknown";
-	if (age > maxAgeDays)
+	// Written so a NaN limit fails the check: `age > NaN` is false and would switch the guard off.
+	if (!(age <= maxAgeDays))
 		return `the mirror is ${age.toFixed(1)} days old (limit ${maxAgeDays})`;
 	return undefined;
 }
@@ -155,7 +157,7 @@ export function exitCode(
 }
 
 /** url -> HTTP status, or why it could not be reached. HEAD first; a 403/405 is retried as GET. */
-export async function checkLinks(
+async function checkLinks(
 	urls: Iterable<string>,
 ): Promise<Map<string, number | string>> {
 	const status = new Map<string, number | string>();
@@ -236,7 +238,7 @@ function explain(r: Result): string[] {
 }
 
 /** The report a person reads. */
-export function report(
+function report(
 	results: Result[],
 	m: Mirror,
 	blocks: number,
@@ -275,3 +277,44 @@ export function report(
 		);
 	return lines;
 }
+
+/** The drift command: compare the record with the mirror. Never throws for a broken read; that is exit 2. */
+export async function runDrift(opts: {
+	maxAgeDays: number;
+	checkLinks: boolean;
+	recordPath?: string | undefined;
+}) {
+	let m: Mirror;
+	let fields: Field[];
+	let blocks: Map<string, Block>;
+	try {
+		m = readMirror();
+		blocks = readRecord(opts.recordPath);
+		fields = compared(blocks);
+	} catch (err) {
+		return {
+			code: 2 as ExitCode,
+			results: [] as Result[],
+			lines: [`Cannot compare: ${(err as Error).message}`],
+		};
+	}
+	const links = opts.checkLinks
+		? await checkLinks(
+				fields.flatMap((f) => safely(() => f.project?.urls(m) ?? [])),
+			)
+		: new Map();
+	const results = fields.flatMap((f) => compareField(f, m, links));
+	return {
+		code: exitCode(results, m, opts.maxAgeDays),
+		results,
+		lines: report(results, m, blocks.size, opts.maxAgeDays),
+	};
+}
+// A shape error is reported by the comparison itself.
+const safely = (f: () => string[]): string[] => {
+	try {
+		return f();
+	} catch {
+		return [];
+	}
+};

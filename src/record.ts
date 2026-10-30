@@ -26,7 +26,7 @@ export const RECORD_PATH =
 const str = z.string();
 const opt = str.optional();
 const common = { compare: z.enum(["true", "false"]).optional() };
-export const ATTRS = {
+const ATTRS = {
 	headline: z.strictObject({ ...common }),
 	about: z.strictObject({ ...common }),
 	position: z.strictObject({
@@ -85,13 +85,12 @@ export const ATTRS = {
 	skills: z.strictObject({ ...common }),
 } as const;
 export type Type = keyof typeof ATTRS;
-export type Attrs<T extends Type> = z.infer<(typeof ATTRS)[T]>;
 const TYPES = Object.keys(ATTRS) as Type[];
 export const isType = (t: string): t is Type => (TYPES as string[]).includes(t);
 
 // LinkedIn's character limits for a block's text, from the editors'
 // counters (2026-10-29). null: not free text. 0: the editor has no description.
-export const TEXT_LIMITS: Record<Type, number | null> = {
+const TEXT_LIMITS: Record<Type, number | null> = {
 	headline: 220,
 	about: 2600,
 	position: 2000,
@@ -175,7 +174,13 @@ export function parseRecord(
 			throw new Error(
 				`${where}: block "${id}" has an unknown type "${type}" (known: ${TYPES.join(", ")})`,
 			);
-		const attrs = parseMeta(node.meta ?? "", where);
+		// From the raw fence line: CommonMark unescapes \" in node.meta, which would end a value early.
+		const opening =
+			source.slice(node.position?.start.offset ?? 0).split("\n", 1)[0] ?? "";
+		const attrs = parseMeta(
+			opening.slice(opening.indexOf(node.lang) + node.lang.length),
+			where,
+		);
 		const checked = ATTRS[type].safeParse(attrs);
 		if (!checked.success)
 			throw new Error(

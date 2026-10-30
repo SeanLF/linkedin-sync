@@ -35,7 +35,7 @@ import {
 import { type Block, skillList, type Type } from "./record.ts";
 
 /** What an attribute set to "" compares as: "must be empty", unlike leaving it out ("not managed"). */
-export const NONE = "(none)";
+const NONE = "(none)";
 /** The main value of a block with no text: the entry's presence. */
 export const PRESENT = "(present)";
 const OK_MEDIA = "no stale media";
@@ -136,7 +136,7 @@ const monthYear = (
  * match and the title equal; without it, "Acme" may hit every role at Acme,
  * which throws rather than guess.
  */
-export function experienceByCompany(
+function experienceByCompany(
 	m: Mirror,
 	rx: RegExp,
 	role: string | undefined,
@@ -237,8 +237,8 @@ function positionField(b: Block): Field {
 			return {
 				path: `details/experience/edit/forms/${e.id}/`,
 				creating: false,
-				heading: /experience|position/iu,
-				identity: [{ control: label("^Title\\*?$"), value: e.title ?? "" }],
+				heading: /^Edit role$/iu, // probe 2026-10-30
+				identity: [{ control: label("^Job title\\*?$"), value: e.title ?? "" }],
 				steps,
 				notify: "required",
 			};
@@ -717,7 +717,6 @@ const FORMS = {
 	} satisfies FormSpec<"certifications">,
 } as const;
 export type FormType = keyof typeof FORMS;
-export const isFormType = (t: string): t is FormType => Object.hasOwn(FORMS, t);
 export const identityAttr = (t: FormType): string => FORMS[t].identity;
 
 function formField<K extends EntityKind>(b: Block, spec: FormSpec<K>): Field {

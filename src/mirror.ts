@@ -13,9 +13,8 @@ import { z } from "zod";
 import { ageDays } from "./dates.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
-export const MIRROR_PATH =
-	process.env["LINKEDIN_MIRROR"] ?? `${ROOT}mirror.json`;
-export const LAST_WRITE_PATH = `${ROOT}last-write.json`;
+const MIRROR_PATH = process.env["LINKEDIN_MIRROR"] ?? `${ROOT}mirror.json`;
+const LAST_WRITE_PATH = `${ROOT}last-write.json`;
 
 // How old a mirror may be before a verdict drawn from it proves nothing.
 export const MAX_AGE_DAYS = 14;
@@ -39,7 +38,6 @@ const Role = z.object({
 });
 const Item = Role.extend({ roles: z.array(Role).optional() });
 export type Item = z.infer<typeof Item>;
-export type Role = z.infer<typeof Role>;
 
 const Range = z.object({
 	start: z.string().nullable(),

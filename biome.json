@@ -6,11 +6,7 @@
 		"useIgnoreFile": true
 	},
 	"files": {
-		"includes": [
-			"**",
-			"!src/**/*.mjs",
-			"!src/**/*.js"
-		]
+		"includes": ["**", "!src/**/*.mjs", "!src/**/*.js"]
 	},
 	"linter": {
 		"domains": {
@@ -71,7 +67,8 @@
 			"preset": "all",
 			"performance": {
 				"useTopLevelRegex": "off",
-				"noAwaitInLoops": "off"
+				"noAwaitInLoops": "off",
+				"useDomNodeTextContent": "off"
 			},
 			"correctness": {
 				"noNodejsModules": "off",
@@ -85,12 +82,30 @@
 	},
 	"overrides": [
 		{
-			"includes": [
-				"package.json"
-			],
+			"includes": ["package.json"],
 			"formatter": {
 				"indentStyle": "space",
 				"indentWidth": 2
+			}
+		},
+		{
+			"includes": ["playwright.config.ts"],
+			"linter": {
+				"rules": {
+					"style": {
+						"noDefaultExport": "off"
+					}
+				}
+			}
+		},
+		{
+			"includes": ["test/**"],
+			"linter": {
+				"rules": {
+					"performance": {
+						"noDelete": "off"
+					}
+				}
 			}
 		}
 	]

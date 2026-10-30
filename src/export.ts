@@ -694,8 +694,9 @@ export async function exportConnections(
 	}
 }
 
+// Names and headlines are other people's text, opened in a spreadsheet: a
+// leading = + - @ tab or CR would run as a formula, so it gets a ' in front.
+const cell = (v: string) =>
+	`"${v.replace(/^[=+\-@\t\r]/u, "'$&").replaceAll('"', '""')}"`;
 export const writeCsv = (path: string, rows: string[][]): void =>
-	writeFileSync(
-		path,
-		`${rows.map((r) => r.map((v) => `"${v.replaceAll('"', '""')}"`).join(",")).join("\n")}\n`,
-	);
+	writeFileSync(path, `${rows.map((r) => r.map(cell).join(",")).join("\n")}\n`);

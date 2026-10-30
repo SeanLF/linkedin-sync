@@ -26,7 +26,7 @@ because it proves each change landed.
   verified by re-exporting and re-comparing; the write channel (the UI) and the
   check channel (the API) are different surfaces, so a bug in one cannot hide in
   the other.
-- **Drift you can trust.** A three-state check (match, drift, or *unreadable*)
+- **Drift you can trust.** A three-state check (match, drift, or _unreadable_)
   with a self-test that proves the checker can still report a difference before
   you believe a clean run.
 - **Reads by API, writes by UI, on purpose.** It replays LinkedIn's own Voyager
@@ -34,10 +34,10 @@ because it proves each change landed.
   write path is React Server Component actions that rotate every deploy. The
   dialog is the stable contract, and it runs LinkedIn's validation and the
   "notify your network" switch, which a replayed write does not.
-- **Auth by borrowing, not logging in.** A scripted login hits LinkedIn's
-  app-approval checkpoint and then "Too many attempts". Instead it copies the
-  session you already have in Chrome, decrypting the cookie jar with the macOS
-  keychain (one Touch ID prompt).
+- **You sign in once, by hand.** A scripted login hits LinkedIn's
+  app-approval checkpoint and then "Too many attempts", so the tool never logs
+  in. It drives its own Chrome window, where you sign in once; the session
+  persists between runs.
 
 ## What a drift check looks like
 
@@ -62,38 +62,41 @@ push it, then `linkedin-sync export && linkedin-sync drift` to confirm it landed
 
 ## Getting started
 
-Requirements: **macOS**, **a supported Node (22+) or Bun**, and **Google Chrome
-signed into LinkedIn** in your everyday profile. The 22 floor is not technical
-(any modern runtime works); it just refuses end-of-life Node. Nothing else to
-install: it uses `@playwright/mcp` over `npx` and the `sqlite3` binary macOS
-already ships.
+Requirements: **macOS**, **Node 26+** (it runs the TypeScript directly, no
+build), and **Google Chrome**.
 
 ```bash
-git clone <this repo> && cd linkedin-sync
+git clone <this repo> && cd linkedin-sync && npm ci
 
-# Import your session, export your profile, and write a linkedin.md
-# bootstrapped from it (nothing to configure):
-node src/cli.mjs init
+# Opens the tool's Chrome window. The first time, sign into LinkedIn there by
+# hand, then rerun. It exports your profile and writes a linkedin.md that
+# matches it exactly.
+node src/cli.ts init
 
-# Edit linkedin.md (it starts as an exact copy of your live profile), then:
-node src/cli.mjs drift                 # see what you changed
-node src/cli.mjs write --dry-run about # rehearse a write (fills and discards)
-node src/cli.mjs write about           # actually write it
-node src/cli.mjs export && node src/cli.mjs drift   # prove it landed
-
-node src/cli.mjs write headline about project.x   # several, one browser session
-node src/cli.mjs write --dry-run --all-drift       # every field drift calls stale
+# Edit linkedin.md, then:
+node src/cli.ts drift                       # see what you changed
+node src/cli.ts write --dry-run about       # rehearse: fill the editor, discard
+node src/cli.ts write about                 # write it, re-export, re-compare
+node src/cli.ts write headline about project.x   # several, one browser session
+node src/cli.ts write --dry-run --all-drift      # every block drift calls stale
+node src/cli.ts mcp                         # export / drift / write as MCP tools
 ```
 
-Several fields in one `write` share one browser attach and one login check;
-each still opens its own editor, is read back and saved on its own, and a
-failing one does not stop the rest (the exit code is the worst field's).
-`--all-drift` refuses a mirror older than your last write: re-export first, or
-an entry created since would read as absent and be created twice. Screenshots
-are taken only when a field fails; `--screenshots` takes one at every step.
+Every real write ends by exporting the profile again and comparing every
+field; the exit code says whether it landed (`--no-verify` skips that). A
+batch shows progress and an ETA, and a failing block does not stop the rest;
+the exit code is the worst block's. `--json` prints one JSON line per block
+and one for the batch on stdout, with the log on stderr. A failing block
+leaves a Playwright trace (`npx playwright show-trace <path>`); `--trace`
+keeps one for every block. `--probe <block>` prints the open editor's
+accessibility tree and changes nothing.
 
-The browser is **visible by default** so you can watch each write happen and
-review it in real time. Set `LINKEDIN_HEADLESS=1` for no window (unattended use).
+`--all-drift` refuses a mirror older than your last write: re-export first,
+or an entry created since would read as absent and be created twice.
+
+The Chrome window is visible by default so you can watch each write. Set
+`LINKEDIN_HEADLESS=1` for no window. `LINKEDIN_COPY` points at a record kept
+elsewhere.
 
 ## The source-of-truth file
 
@@ -114,22 +117,23 @@ it starts matching and you edit down from there:
 The tag says what a block is; a `match` or `title` attribute says which entry it
 maps to. Where a company holds several roles, add `role="Exact role title"` to
 pick one: `match="Acme Corp" role="Senior Engineer"`. Without it the tool
-refuses rather than guess which role to read or write. This is the only per-user file. Everything else is machinery.
+refuses rather than guess which role to read or write. An attribute the block's
+type does not know is an error, so a typo cannot silently manage nothing.
 
 The other attributes are values the block manages, each compared on its own
 drift line (`position.acme-corp.dates`). Leave one out and the tool leaves that
 value alone; set it to `""` and the tool makes it empty.
 
-| Block | Finds its entry by | Values it can carry | Text |
-|---|---|---|---|
-| `position.*` | `match`, `role` | `dates="Mar 2020 - Aug 2023"`, `company`, `skills` | description |
-| `project.*` | `title` | `dates`, `link` | description |
-| `education.*` | `match` (school, degree or field) | `school`, `degree`, `field`, `dates="2010 - 2014"`, `grade`, `activities` | description |
-| `honor.*` | `title` | `issuer`, `date="May 2015"`, `associated="Role at Company"` | description |
-| `publication.*` | `title` | `publisher`, `date`, `url` | description |
-| `volunteer.*` | `match` (organization), `role` | `cause`, `dates` | description |
-| `certification.*` | `name` | `issuer`, `dates="Mar 2018"` or `"Mar 2018 - Mar 2021"`, `credential`, `url` | none |
-| `skills` | | | one skill per line |
+| Block             | Finds its entry by                          | Values it can carry                                                          | Text               |
+| ----------------- | ------------------------------------------- | ---------------------------------------------------------------------------- | ------------------ |
+| `position.*`      | `match`, `role`                             | `dates="Mar 2020 - Aug 2023"`, `company`                                     | description        |
+| `project.*`       | `title`                                     | `dates`, `link`                                                              | description        |
+| `education.*`     | `match` (part of "school · degree · field") | `school`, `degree`, `field`, `dates="2010 - 2014"`, `grade`, `activities`    | description        |
+| `honor.*`         | `title`                                     | `issuer`, `date="May 2015"`, `associated="Role at Company"`                  | description        |
+| `publication.*`   | `title`                                     | `publisher`, `date`, `url`                                                   | description        |
+| `volunteer.*`     | `match` (organization), `role`              | `cause`, `dates`                                                             | description        |
+| `certification.*` | `name`                                      | `issuer`, `dates="Mar 2018"` or `"Mar 2018 - Mar 2021"`, `credential`, `url` | none               |
+| `skills`          |                                             |                                                                              | one skill per line |
 
     ```linkedin:certification.first-aid name="First Aid" credential=""
     ```
@@ -143,21 +147,27 @@ A block whose entry is not on LinkedIn yet is created by `write`, but only
 from a mirror younger than drift's 14-day limit whose collection was read in
 full: "not in the mirror" is how a duplicate gets made. `write
 --delete honor "Old award"` removes one the record no longer carries (also
-`education`, `publication`, `volunteer`, `certification`, `skill`). `write
+`education`, `publication`, `volunteer`, `certification`, `project`, `skill`;
+`--delete volunteer "Food Bank" role="Driver"` for more than one key). A dry
+run stops at LinkedIn's confirmation, and a delete with no confirmation stops
+without clicking anything more. `write
 skills` adds the missing skills and deletes the extra ones; LinkedIn has no
 rename, so a renamed skill is a delete and an add and loses its endorsements.
 The adds go first and any failed add cancels every delete. Skill names
 compare without case (LinkedIn spells the skill), so a record that writes
 `Javascript` for a live `JavaScript` gets a note to fix the record, never a
-delete. An empty skills block is refused. An option `write` does not know
-(`--dryrun`) is an error, not ignored.
+delete. An empty skills block is refused, and so is one that
+would delete more than a quarter of your skills (`--allow-mass-remove`). An
+option `write` does not know (`--dryrun`) is an error, not ignored.
+`--add-link <project>` attaches the block's `link=` as media;
+`--remove-media <project> "<title>"` removes one item.
 `drift --check-links` also fetches every project link and reports dead ones,
 and every project with media gets a `.media` line naming links LinkedIn could
 not preview.
 
 ## Honest limits
 
-- **macOS + Chrome only.** The session import is keychain- and Chrome-specific.
+- **macOS + Chrome only.** It drives Google Chrome on macOS.
 - **It breaks when LinkedIn ships.** Query IDs and dialog shapes rotate. A
   broken read exits with a distinct "the instrument is broken" code rather than
   a false clean; a moved dialog makes the writer refuse rather than guess.
@@ -168,6 +178,15 @@ not preview.
   "Add", LinkedIn fetches a preview and shows its own form; the writer saves
   only if that form has exactly one Save, and the export decides.
 - **It uses LinkedIn against its terms of service.** That is your call to make.
+
+## Development
+
+```bash
+npm run check   # Biome (all rules), tsc (strict), knip, Playwright tests
+```
+
+The logic tests run without a browser; the dialog tests drive local copies of
+LinkedIn's edit dialogs in your installed Chrome. Test data is made up.
 
 ## License
 

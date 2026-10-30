@@ -1,6 +1,4 @@
 # Toolchain for anyone using mise (https://mise.jdx.dev). Optional: the tool
-# only needs a JS runtime and macOS's own sqlite3. Node LTS is the default;
-# Bun works too (uncomment it and run with `bun src/cli.mjs ...`).
+# needs Node 26 or later (it runs the TypeScript directly).
 [tools]
-node = "lts"
-# bun = "latest"
+node = "26"

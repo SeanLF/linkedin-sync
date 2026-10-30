@@ -16,7 +16,7 @@ const monthNames = (month: "short" | "long") =>
 	Array.from({ length: 12 }, (_, i) =>
 		new Temporal.PlainDate(2000, i + 1, 1).toLocaleString("en-US", { month }),
 	);
-export const MONTHS = monthNames("short");
+const MONTHS = monthNames("short");
 export const MONTH_NAMES = monthNames("long");
 
 // The abbreviation or the full name, nothing between: a prefix match read "Junk 2015" as June.

@@ -22,12 +22,12 @@ jobs:
 
       - uses: actions/setup-node@v5
         with:
-          node-version: "lts/*"
+          node-version: "26"
       - name: Generate a CycloneDX SBOM of the npm dependencies
         # npm sbom needs the package present in node_modules, not just a
-        # lockfile; --ignore-scripts skips @playwright/mcp's browser download.
+        # lockfile.
         run: |
-          npm install --ignore-scripts
+          npm ci --ignore-scripts
           npm sbom --sbom-format=cyclonedx > sbom.cdx.json
 
       - uses: ruby/setup-ruby@v1

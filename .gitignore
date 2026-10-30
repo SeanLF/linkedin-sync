@@ -6,3 +6,5 @@ linkedin.md
 connections.csv
 sbom.cdx.json
 last-write.json
+test-results/
+playwright-report/

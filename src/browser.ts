@@ -21,7 +21,7 @@ const PROFILE = `${homedir()}/Library/Caches/ms-playwright/mcp-chrome-linkedin-c
 const CHROME =
 	process.env["LINKEDIN_CHROME_BIN"] ??
 	"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-export const ORIGIN = "https://www.linkedin.com";
+const ORIGIN = "https://www.linkedin.com";
 
 /** LinkedIn said stop. Nothing more runs in this session; retrying makes it worse. */
 export class StopError extends Error {}
@@ -83,7 +83,7 @@ export type Voyager = <S extends z.ZodType>(
 	schema: S,
 ) => Promise<z.infer<S>>;
 
-export class ApiError extends Error {
+class ApiError extends Error {
 	readonly status: number;
 	constructor(status: number, path: string) {
 		super(`API ${status}: ${path.split("?")[0]}`);
