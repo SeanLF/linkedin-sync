@@ -27,6 +27,7 @@ const Media = z.object({
 	thumbnail: z.boolean(),
 	description: z.string().optional(),
 });
+export type Media = z.infer<typeof Media>;
 const Role = z.object({
 	title: z.string().optional(),
 	subtitle: z.string().optional(),

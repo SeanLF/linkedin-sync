@@ -12,6 +12,7 @@
 
 import { tmpdir } from "node:os";
 import process from "node:process";
+import type { Page } from "@playwright/test";
 import {
 	connect,
 	openProfilePath,
@@ -20,6 +21,7 @@ import {
 } from "./browser.ts";
 import { compared, compareField, staleFields, staleMirror } from "./drift.ts";
 import {
+	type MediaTarget,
 	type Mode,
 	Refused,
 	runAddLink,
@@ -38,11 +40,13 @@ import {
 	fieldFor,
 	identityAttr,
 	planSkills,
+	sameLink,
 } from "./fields.ts";
 import {
 	entities,
 	type LastWrite,
 	MAX_AGE_DAYS,
+	type Media,
 	type Mirror,
 	readLastWrite,
 	readMirror,
@@ -511,10 +515,58 @@ export async function deleteEntry(
 		: code;
 }
 
-/** Attach a project block's link= as media, or remove one media item by title. */
+/**
+ * The one media item a removal means: by title, and by kind (LINK, IMAGE...)
+ * where titles collide. `nth` is its place among the items with that title,
+ * in the order the editor lists them; `of` is how many there are.
+ */
+export function pickMedia(
+	media: readonly Media[],
+	title: string,
+	kind?: string,
+): MediaTarget {
+	const same = media.filter((x) => x.title === title);
+	if (!same.length)
+		throw new Refused(
+			`no media item titled ${JSON.stringify(title)} in the mirror (it has ${media.map((x) => JSON.stringify(x.title)).join(", ") || "none"}); re-export if it was just added`,
+		);
+	const hits = kind ? same.filter((x) => x.kind === kind.toUpperCase()) : same;
+	const kinds = same.map((x) => x.kind).join(", ");
+	if (hits.length !== 1 || !hits[0])
+		throw new Refused(
+			kind
+				? `${hits.length} media items titled ${JSON.stringify(title)} are ${kind.toUpperCase()} (the ${same.length} with that title: ${kinds}); expected one`
+				: `${same.length} media items are titled ${JSON.stringify(title)} (${kinds}); pick one with --kind`,
+		);
+	const item = hits[0];
+	return {
+		title,
+		nth: same.indexOf(item),
+		of: same.length,
+		kind: item.kind,
+		description: item.description,
+	};
+}
+
+/** Is the link already media, only the legacy "Project URL", or neither? */
+export function linkPlace(
+	p: NonNullable<Field["project"]>,
+	link: string,
+	m: Mirror,
+): "media" | "legacy" | "absent" {
+	if (p.media(m).some((x) => x.url && sameLink(x.url, link))) return "media";
+	const legacy = p.legacyUrl(m);
+	return legacy && sameLink(legacy, link) ? "legacy" : "absent";
+}
+
+export type MediaAction =
+	| { add: true; moveLegacy?: boolean }
+	| { remove: string; kind?: string };
+
+/** Attach a project block's link= as media, or remove one media item by title (and kind). */
 export async function projectMedia(
 	id: string,
-	action: { add: true } | { remove: string },
+	action: MediaAction,
 	o: Options,
 	recordPath?: string,
 ): Promise<Code> {
@@ -529,12 +581,21 @@ export async function projectMedia(
 			`"${f.project.title}" is not on LinkedIn yet; write the project first`,
 		);
 	const { title, link } = f.project;
+	const dry = o.mode !== "save";
+	let run: (page: Page) => Promise<string>;
 	if ("add" in action) {
 		if (!link) throw new Refused(`${id} has no link="..."`);
-		if (f.project.urls(m).includes(link)) {
-			sayer(o)(`${link} is already on "${title}"; nothing to add`);
+		// Only media counts: the legacy "Project URL" is another field, and
+		// once said "already on" for a project whose media list was empty.
+		const place = linkPlace(f.project, link, m);
+		if (place === "media") {
+			sayer(o)(`${link} is already media on "${title}"; nothing to add`);
 			return 0;
 		}
+		if (place === "legacy" && !action.moveLegacy)
+			throw new Refused(
+				`${link} is "${title}"'s legacy "Project URL", not a media item (the export lists ${f.project.media(m).length} media items). --move-legacy-url clears that field and adds the link as media, in one save`,
+			);
 		// Adding a media item is a create: a rerun after a crash would add it twice.
 		assertFreshForCreate(
 			m,
@@ -542,18 +603,18 @@ export async function projectMedia(
 			readLastWrite(),
 			o.maxAgeDays,
 		);
+		const moveLegacy = action.moveLegacy ?? false;
+		run = (page) => runAddLink(page, title, link, { dryRun: dry, moveLegacy });
+	} else {
+		const target = pickMedia(f.project.media(m), action.remove, action.kind);
+		run = (page) => runRemoveMedia(page, title, target, dry);
 	}
-	const dry = o.mode !== "save";
 	if (!dry)
 		recordWrite([`${"add" in action ? "--add-link" : "--remove-media"} ${id}`]);
 	const code = await session(o, (s, step) =>
 		step(`${o.mode}-media`, async () => {
 			await openProfilePath(s, ed.path);
-			const out =
-				"add" in action
-					? await runAddLink(s.page, title, link ?? "", dry)
-					: await runRemoveMedia(s.page, title, action.remove, dry);
-			sayer(o)(`  ${out}`);
+			sayer(o)(`  ${await run(s.page)}`);
 			return 0;
 		}),
 	);

@@ -7,6 +7,7 @@ import { readFileSync } from "node:fs";
 import { expect, test as it, type Page } from "@playwright/test";
 import {
 	Refused,
+	runAddLink,
 	runAddSkill,
 	runDelete,
 	runEditor,
@@ -383,12 +384,191 @@ it("removing media checks the project's share switch before any click", async ({
 	<button aria-label="Dismiss" onclick="ed.remove()">x</button><button>Save</button>
 </div>
 <script>window.clicked = false;</script>`);
-	await expect(runRemoveMedia(page, "Widget", "Repo", false)).rejects.toThrow(
-		/is ON/u,
-	);
+	await expect(
+		runRemoveMedia(
+			page,
+			"Widget",
+			{ title: "Repo", nth: 0, of: 1, kind: "LINK" },
+			false,
+		),
+	).rejects.toThrow(/is ON/u);
 	expect(
 		await page.evaluate(
 			() => (globalThis as unknown as { clicked: boolean }).clicked,
 		),
 	).toBe(false);
+});
+
+interface Media {
+	title: string;
+	kind: "LINK" | "IMAGE";
+	description?: string;
+}
+
+/**
+ * LinkedIn's project editor with media, as probed 2026-11-03: one native
+ * <dialog> whose project view lists each item as a link "Edit media, <title>";
+ * clicking one turns the dialog into an "Edit media" view (Title, Description,
+ * Delete, Back, and a Save of its own), and Delete asks "Delete this media?"
+ * in a second native <dialog>. window.saved holds the items the project saved.
+ */
+function projectWithMedia(page: Page, media: Media[]) {
+	return page.setContent(`<!doctype html><meta charset="utf-8">
+<dialog id="ed"></dialog>
+<script>
+	const items = ${JSON.stringify(media)};
+	window.saved = null;
+	const ed = document.getElementById("ed");
+	const esc = (s) => s.replace(/[&<>"]/g, (c) => "&#" + c.charCodeAt(0) + ";");
+	const thumb = (m) => m.kind === "LINK"
+		? "https://media.example/dms/image/sync/v2/X/articleshare-shrink_480/0"
+		: "https://media.example/dms/image/v2/Y/profile-treasury-image-shrink_480_480/0";
+	const close = () => { ed.close(); ed.remove(); };
+	function project() {
+		ed.innerHTML = '<button aria-label="Dismiss" id="x">x</button><h2>Edit project</h2>' +
+			'<label for="n">Project name*</label><input id="n" value="Widget">' +
+			'<ul>' + items.map((m, i) => '<li><a href="#" data-i="' + i + '"><div>Edit media, ' + esc(m.title) +
+				'</div><figure><img alt="" src="' + thumb(m) + '"></figure></a><p>' + esc(m.title) + '</p><p>' +
+				esc(m.description ?? "") + '</p></li>').join("") + '</ul>' +
+			'<button id="save">Save</button>';
+		ed.querySelector("#x").onclick = close;
+		ed.querySelector("#save").onclick = () => { window.saved = items.map((m) => m.kind + " " + m.title); close(); };
+		ed.querySelectorAll("a[data-i]").forEach((a) => { a.onclick = (e) => { e.preventDefault(); edit(Number(a.dataset.i)); }; });
+	}
+	function edit(i) {
+		const m = items[i];
+		ed.innerHTML = '<button aria-label="Dismiss" id="x">x</button><h2>Edit media</h2>' +
+			'<label for="t">Title*</label><input id="t" value="' + esc(m.title) + '">' +
+			'<label for="d">Description</label><textarea id="d">' + esc(m.description ?? "") + '</textarea>' +
+			'<button id="del">Delete</button><button id="back">Back</button><button id="msave">Save</button>';
+		ed.querySelector("#x").onclick = close;
+		ed.querySelector("#back").onclick = project;
+		ed.querySelector("#msave").onclick = project;
+		ed.querySelector("#del").onclick = () => {
+			const q = document.createElement("dialog");
+			q.innerHTML = "<h2>Delete media</h2><p>Delete this media? This action cannot be undone.</p><button id=yes>Delete</button><button id=no>Cancel</button>";
+			document.body.append(q);
+			q.showModal();
+			q.querySelector("#yes").onclick = () => { items.splice(i, 1); q.close(); q.remove(); setTimeout(project, 200); };
+			q.querySelector("#no").onclick = () => { q.close(); q.remove(); };
+		};
+	}
+	project();
+	ed.showModal();
+</script>`);
+}
+const digest: Media[] = [
+	{ title: "Sean's Digest", kind: "LINK" },
+	{ title: "Sean's Digest", kind: "IMAGE", description: "Old screenshot" },
+	{ title: "fix: a · Pull Request #3018 · org/repo", kind: "LINK" },
+];
+const image = {
+	title: "Sean's Digest",
+	nth: 1,
+	of: 2,
+	kind: "IMAGE",
+	description: "Old screenshot",
+};
+
+it("removing media: a dry run finds the IMAGE among two items with one quoted title, and touches nothing", async ({
+	page,
+}) => {
+	await projectWithMedia(page, digest);
+	const out = await runRemoveMedia(page, "Widget", image, true);
+	expect(out).toMatch(
+		/would delete IMAGE "Sean's Digest" \(item 2 of 2 .*upload thumbnail, description "Old screenshot"\)/u,
+	);
+	expect(await saved(page)).toBeNull();
+	await expect(page.getByRole("dialog")).toHaveCount(0);
+});
+
+it("removing media: a real run confirms LinkedIn's second dialog, then saves the project without the IMAGE", async ({
+	page,
+}) => {
+	await projectWithMedia(page, digest);
+	expect(await runRemoveMedia(page, "Widget", image, false)).toMatch(/^saved/u);
+	expect(await saved(page)).toEqual([
+		"LINK Sean's Digest",
+		"LINK fix: a · Pull Request #3018 · org/repo",
+	]);
+});
+
+it("removing media: a title with · and # is found", async ({ page }) => {
+	await projectWithMedia(page, digest);
+	const pr = {
+		title: "fix: a · Pull Request #3018 · org/repo",
+		nth: 0,
+		of: 1,
+		kind: "LINK",
+	};
+	expect(await runRemoveMedia(page, "Widget", pr, true)).toMatch(
+		/would delete LINK "fix: a · Pull Request #3018/u,
+	);
+});
+
+it("removing media: a thumbnail that disagrees with the kind is refused", async ({
+	page,
+}) => {
+	await projectWithMedia(page, digest);
+	await expect(
+		runRemoveMedia(page, "Widget", { ...image, nth: 0 }, true),
+	).rejects.toThrow(/has a LINK thumbnail, not a IMAGE's/u);
+	await expect(page.getByRole("dialog")).toHaveCount(0);
+	expect(await saved(page)).toBeNull();
+});
+
+it("removing media: an editor that lists a different count from the mirror is refused", async ({
+	page,
+}) => {
+	await projectWithMedia(page, digest);
+	await expect(
+		runRemoveMedia(page, "Widget", { ...image, of: 3 }, true),
+	).rejects.toThrow(/the editor shows 2 media items .* the mirror 3/u);
+	await expect(page.getByRole("dialog")).toHaveCount(0);
+});
+
+/** An older project: the legacy "Project URL" field, and Add media > Add a link > a paste box. */
+function legacyProject(page: Page, url: string) {
+	return page.setContent(`<!doctype html><meta charset="utf-8">
+<div role="dialog" id="ed"><h2>Edit project</h2>
+	<button aria-label="Dismiss" onclick="ed.remove(); window.closed = true">x</button>
+	<label for="n">Project name*</label><input id="n" value="Widget">
+	<label for="u">Project URL</label><input id="u" value="${url}">
+	<button id="add">Add media</button><div id="menu"></div>
+	<button>Save</button>
+</div>
+<script>
+	add.onclick = () => {
+		menu.innerHTML = '<div role="menuitem" id="mi">Add a link</div>';
+		mi.onclick = () => {
+			const p = document.createElement("div");
+			p.setAttribute("role", "dialog");
+			p.innerHTML = '<h2>Add a link</h2><label for="l">Paste or type a link</label><input id="l"><button>Add</button><button aria-label="Dismiss" onclick="this.parentElement.remove()">x</button>';
+			document.body.append(p);
+		};
+	};
+</script>`);
+}
+
+it("adding a link: a legacy Project URL holding it is refused unless moved, and another one always", async ({
+	page,
+}) => {
+	const url = "https://git.example/w";
+	await legacyProject(page, `${url}/`);
+	await expect(
+		runAddLink(page, "Widget", url, { dryRun: true }),
+	).rejects.toThrow(
+		/legacy "Project URL" field, not media; --move-legacy-url/u,
+	);
+	await legacyProject(page, url);
+	expect(
+		await runAddLink(page, "Widget", url, { dryRun: true, moveLegacy: true }),
+	).toMatch(/^would clear the legacy "Project URL" and add/u);
+	await expect(page.getByRole("dialog")).toHaveCount(0);
+	await legacyProject(page, "https://other.example");
+	await expect(
+		runAddLink(page, "Widget", url, { dryRun: true, moveLegacy: true }),
+	).rejects.toThrow(
+		/holds https:\/\/other\.example; set that one link by hand/u,
+	);
 });

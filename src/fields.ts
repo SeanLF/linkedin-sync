@@ -29,6 +29,7 @@ import {
 	type EntityKind,
 	entities,
 	type Item,
+	type Media,
 	type Mirror,
 	section,
 } from "./mirror.ts";
@@ -80,13 +81,36 @@ export interface Field {
 	/** The editor that brings LinkedIn to the record; throws on a shape error. */
 	editor?: (m: Mirror) => Editor;
 	/** For deletes: the editor of the live entry, without changes. */
-	project?: { title: string; link?: string; urls: (m: Mirror) => string[] };
+	project?: {
+		title: string;
+		link?: string;
+		/** What a reader can click: media links, then the legacy "Project URL". */
+		urls: (m: Mirror) => string[];
+		/** The media items, in the order the profile and the editor list them. */
+		media: (m: Mirror) => Media[];
+		/** The legacy "Project URL" field, which is not a media item. */
+		legacyUrl: (m: Mirror) => string | undefined;
+	};
 }
 
 const lc = (s: string | undefined) => (s ?? "").toLowerCase();
-/** A string as a literal regex. */
+/**
+ * Two links are the same link if they differ only by trailing slashes:
+ * LinkedIn stores "https://x.dev/" for some links and "https://x.dev" for others.
+ */
+export const sameLink = (a: string, b: string): boolean =>
+	a.replace(/\/+$/u, "") === b.replace(/\/+$/u, "");
+
+/**
+ * A string as a literal regex. Quotes become \x27 and \x22: Playwright passes
+ * a text or name regex inside its selector string, where a bare quote opens a
+ * string and the selector stops matching anything ("Sean's" found 0 items).
+ */
 export const escapeRe = (s: string): string =>
-	s.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+	s
+		.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")
+		.replaceAll("'", "\\x27")
+		.replaceAll('"', "\\x22");
 const anyCase = (s: string) => new RegExp(escapeRe(s), "iu");
 const orNone = (v: string | undefined) => (v ? v : NONE);
 const label = (pattern: string, nth = 0): Control => ({
@@ -280,12 +304,13 @@ function projectField(b: Block): Field {
 		);
 	const range =
 		dates === undefined ? undefined : monthRange(dates, "a project's");
+	const media = (m: Mirror) => shown(m)?.media ?? [];
+	const legacyUrl = (m: Mirror) => record(m)?.url ?? undefined;
 	// What a reader can click: external media links, plus the legacy "Project URL".
 	const urls = (m: Mirror) => {
-		const r = shown(m);
-		const e = record(m);
-		const out = (r?.media ?? []).flatMap((x) => (x.url ? [x.url] : []));
-		if (e?.url) out.push(e.url);
+		const out = media(m).flatMap((x) => (x.url ? [x.url] : []));
+		const legacy = legacyUrl(m);
+		if (legacy) out.push(legacy);
 		return out;
 	};
 	const facets: Facet[] = [];
@@ -309,7 +334,7 @@ function projectField(b: Block): Field {
 				const r = shown(m);
 				if (!r) return;
 				const seen = urls(m);
-				if (seen.includes(link)) return link;
+				if (seen.some((u) => sameLink(u, link))) return link;
 				const hidden = (r.media ?? []).filter(
 					(x) => x.kind === "LINK" && !x.url,
 				).length;
@@ -331,7 +356,13 @@ function projectField(b: Block): Field {
 			return b.text.trim() ? r.description : PRESENT;
 		},
 		facets,
-		project: { title, urls, ...(link === undefined ? {} : { link }) },
+		project: {
+			title,
+			urls,
+			media,
+			legacyUrl,
+			...(link === undefined ? {} : { link }),
+		},
 		editor: (m) => {
 			// Present in either read is present, even with no description: an edit, never a create.
 			const e = record(m);

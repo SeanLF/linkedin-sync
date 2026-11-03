@@ -49,6 +49,10 @@ async function ensureChrome(): Promise<void> {
 			"--no-first-run",
 			"--no-default-browser-check",
 			"--window-size=1400,1000",
+			// A covered window's tab otherwise counts as hidden, and a hidden
+			// tab runs no animation frames: every click waits out its timeout.
+			"--disable-backgrounding-occluded-windows",
+			"--disable-renderer-backgrounding",
 		],
 		{ detached: true, stdio: "ignore" },
 	).unref();
@@ -185,5 +189,10 @@ export async function openProfilePath(
 		throw new StopError(`LinkedIn redirected to ${at}; stopping`);
 	if (await s.page.getByText(/too many attempts/iu).count())
 		throw new StopError('LinkedIn says "Too many attempts"; stopping');
+	await s.page.bringToFront();
+	if ((await s.page.evaluate("document.visibilityState")) === "hidden")
+		throw new StopError(
+			"the tool's Chrome tab is hidden (window minimized or covered), where every click stalls; show the window, or quit that Chrome and rerun with LINKEDIN_HEADLESS=1",
+		);
 	return url;
 }

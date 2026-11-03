@@ -6,7 +6,7 @@ import { dateLabel, parseDate, parseRange, rangeLabel } from "../src/dates.ts";
 import { compared, compareField, exitCode, staleFields } from "../src/drift.ts";
 import { Refused } from "../src/editor.ts";
 import { mergeRecent, parseCsv } from "../src/export.ts";
-import { fieldFor, planSkills } from "../src/fields.ts";
+import { escapeRe, fieldFor, planSkills } from "../src/fields.ts";
 import { bootstrapText } from "../src/init.ts";
 import type { Mirror } from "../src/mirror.ts";
 import { overLimit } from "../src/record.ts";
@@ -15,6 +15,8 @@ import {
 	DEFAULTS,
 	deleteTarget,
 	driftIds,
+	linkPlace,
+	pickMedia,
 	skillsPlan,
 } from "../src/write.ts";
 import { mirror, record } from "./fixture.ts";
@@ -312,6 +314,117 @@ it.describe("review findings", () => {
 		expect(f.editor?.(none).creating).toBe(true);
 		delete none.entities.projects; // and not when the collection could not be read
 		expect(compareField(f, none)[0]?.verdict).toBe("unreadable");
+	});
+});
+
+it.describe("project media", () => {
+	// Two items with one title, as LinkedIn left "Sean's Daily News Digest": a
+	// link preview, then an old upload with a description.
+	const withMedia = () => {
+		const m = mirror();
+		const p = m.sections.Projects?.[0];
+		if (p)
+			p.media = [
+				{
+					title: "It's live",
+					kind: "LINK",
+					url: "https://x.example/",
+					thumbnail: true,
+				},
+				{
+					title: "It's live",
+					kind: "IMAGE",
+					url: null,
+					thumbnail: true,
+					description: "Old screenshot",
+				},
+				{
+					title: "Repo",
+					kind: "LINK",
+					url: "https://git.example/w",
+					thumbnail: true,
+				},
+			];
+		return m;
+	};
+	const project = (attrs: string) =>
+		fieldFor(
+			record(fence(`project.w title="Widget" ${attrs}`, "A widget.")).get(
+				"project.w",
+			) as never,
+		);
+
+	it("a title shared by two items needs --kind, and --kind picks its place among them", () => {
+		const media = withMedia().sections.Projects?.[0]?.media ?? [];
+		expect(() => pickMedia(media, "It's live")).toThrow(
+			/2 media items .*LINK, IMAGE.*--kind/u,
+		);
+		expect(pickMedia(media, "It's live", "image")).toEqual({
+			title: "It's live",
+			nth: 1,
+			of: 2,
+			kind: "IMAGE",
+			description: "Old screenshot",
+		});
+		expect(pickMedia(media, "Repo")).toMatchObject({
+			nth: 0,
+			of: 1,
+			kind: "LINK",
+		});
+		expect(() => pickMedia(media, "It's live", "DOCUMENT")).toThrow(
+			/0 media items/u,
+		);
+		expect(() => pickMedia(media, "Gone")).toThrow(
+			/no media item titled "Gone".*"Repo"/u,
+		);
+	});
+	it("a link differing by a trailing slash is the same link", () => {
+		expect(
+			verdicts(
+				fence('project.w title="Widget" link="https://x.example"', "A widget."),
+				withMedia(),
+			)["project.w.link"],
+		).toBe("match");
+		expect(
+			verdicts(
+				fence(
+					'project.w title="Widget" link="https://git.example/w/"',
+					"A widget.",
+				),
+				withMedia(),
+			)["project.w.link"],
+		).toBe("match");
+	});
+	it("--add-link counts media only: a legacy Project URL is not 'already on'", () => {
+		const m = withMedia();
+		const f = project('link="https://legacy.example"');
+		expect(linkPlace(f.project as never, "https://x.example", m)).toBe("media");
+		expect(linkPlace(f.project as never, "https://legacy.example", m)).toBe(
+			"absent",
+		);
+		const e = m.entities.projects?.[0];
+		if (e) e.url = "https://legacy.example/";
+		expect(linkPlace(f.project as never, "https://legacy.example", m)).toBe(
+			"legacy",
+		);
+		// drift still counts it: a reader can click it
+		expect(
+			verdicts(
+				fence(
+					'project.w title="Widget" link="https://legacy.example"',
+					"A widget.",
+				),
+				m,
+			)["project.w.link"],
+		).toBe("match");
+	});
+	it("escapeRe keeps quotes out of Playwright's selector string", () => {
+		const re = new RegExp(
+			`^${escapeRe(`Sean's "Digest" · #3018 (a/b)`)}$`,
+			"u",
+		);
+		expect(re.test(`Sean's "Digest" · #3018 (a/b)`)).toBe(true);
+		expect(re.source).not.toMatch(/['"]/u);
 	});
 });
 

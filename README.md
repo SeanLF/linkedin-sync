@@ -159,8 +159,13 @@ compare without case (LinkedIn spells the skill), so a record that writes
 delete. An empty skills block is refused, and so is one that
 would delete more than a quarter of your skills (`--allow-mass-remove`). An
 option `write` does not know (`--dryrun`) is an error, not ignored.
-`--add-link <project>` attaches the block's `link=` as media;
-`--remove-media <project> "<title>"` removes one item.
+`--add-link <project>` attaches the block's `link=` as media (only media
+counts as "already there"; a link sitting in an old project's legacy
+"Project URL" field is refused unless `--move-legacy-url` clears that field in
+the same save). `--remove-media <project> "<title>"` removes one item; where
+two items share a title, `--kind IMAGE` (or `LINK`) picks one, and the dry run
+names the item it would delete. Links that differ only by a trailing slash
+compare equal.
 `drift --check-links` also fetches every project link and reports dead ones,
 and every project with media gets a `.media` line naming links LinkedIn could
 not preview.

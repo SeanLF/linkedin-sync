@@ -8,7 +8,13 @@
 // re-export and drift; a dialog that closed is not the proof.
 
 import { expect, type Locator, type Page } from "@playwright/test";
-import { type Control, type Editor, escapeRe, type Step } from "./fields.ts";
+import {
+	type Control,
+	type Editor,
+	escapeRe,
+	type Step,
+	sameLink,
+} from "./fields.ts";
 
 export type Mode = "save" | "dry" | "noop" | "probe";
 
@@ -546,26 +552,53 @@ async function discardAll(page: Page): Promise<void> {
 		await discard(page, page.getByRole("dialog").last()).catch(() => undefined);
 }
 
+/** Clear the legacy "Project URL" field if it holds this link and moveLegacy says so; refuse if it holds anything else. */
+async function clearLegacyUrl(
+	page: Page,
+	editor: Locator,
+	url: string,
+	moveLegacy: boolean,
+): Promise<string> {
+	const legacy = editor.getByLabel(/^Project URL$/iu).first();
+	const held = (await legacy.count()) ? (await legacy.inputValue()).trim() : "";
+	if (!held) return "";
+	if (!(moveLegacy && sameLink(held, url))) {
+		await discardAll(page);
+		throw new Refused(
+			sameLink(held, url)
+				? `${url} is in the legacy "Project URL" field, not media; --move-legacy-url clears that field and adds it as media`
+				: `the legacy "Project URL" field holds ${held}; set that one link by hand`,
+		);
+	}
+	await legacy.fill("");
+	if ((await legacy.inputValue()) !== "") {
+		await discardAll(page);
+		throw new Refused('the legacy "Project URL" field would not clear');
+	}
+	return 'clear the legacy "Project URL" and ';
+}
+
 /**
  * Attach a link to the open project as media: Add media, Add a link, paste.
  * Past "Add" LinkedIn fetches a preview and shows its own form, so a real run
  * goes on only if that form has exactly one visible Save or Apply; anything
  * else is discarded. A dry run stops before "Add".
+ *
+ * An older project can still have the legacy "Project URL" field, which is
+ * not media. With moveLegacy, a field holding this same link is cleared in
+ * the same save, so the link moves to media instead of showing twice; a field
+ * holding another link is refused either way.
  */
 export async function runAddLink(
 	page: Page,
 	title: string,
 	url: string,
-	dryRun: boolean,
+	opts: { dryRun: boolean; moveLegacy?: boolean },
 ): Promise<string> {
+	const { dryRun, moveLegacy = false } = opts;
 	const editor = await projectEditor(page, title);
 	await assertProjectQuiet(page, editor);
-	if (await editor.getByLabel(/^Project URL$/iu).count()) {
-		await discardAll(page);
-		throw new Refused(
-			'this project still has the legacy "Project URL" field; set that one link by hand',
-		);
-	}
+	const moved = await clearLegacyUrl(page, editor, url, moveLegacy);
 	await editor
 		.getByRole("button", { name: /^add media$/iu })
 		.first()
@@ -582,7 +615,7 @@ export async function runAddLink(
 		await discardAll(page);
 		if (typed !== url)
 			throw new Refused(`the link box reads ${JSON.stringify(typed)}`);
-		return "would add (stopped before Add, where LinkedIn fetches the preview); discarded";
+		return `would ${moved}add (stopped before Add, where LinkedIn fetches the preview); discarded`;
 	}
 	await panel.getByRole("button", { name: /^add$/iu }).first().click();
 	const form = page.getByRole("dialog").last();
@@ -623,85 +656,205 @@ export async function runAddLink(
 	return save(page, page.getByRole("dialog").first());
 }
 
+/** The media item a removal means, as the mirror lists it (see pickMedia). */
+export interface MediaTarget {
+	title: string;
+	/** Its place among the items with this title, in the editor's order. */
+	nth: number;
+	/** How many items have this title. */
+	of: number;
+	kind: string;
+	description?: string | undefined;
+}
+
+const MEDIA_PREFIX = "Edit media, ";
+
+/** A link preview's thumbnail is LinkedIn's "articleshare" image; an upload's is not. */
+function thumbKind(src: string | null | undefined): string {
+	if (!src) return "no thumbnail";
+	return src.includes("/articleshare-") ? "LINK" : "upload";
+}
+
+/** Whether a condition comes true within the timeout. */
+async function until(
+	cond: () => Promise<boolean>,
+	timeout: number,
+): Promise<boolean> {
+	const end = Date.now() + timeout;
+	for (;;) {
+		if (await cond().catch(() => false)) return true;
+		if (Date.now() > end) return false;
+		await new Promise((r) => setTimeout(r, 200));
+	}
+}
+
+/** Whether a check passes within its timeout, without throwing. */
+const passes = (check: Promise<unknown>) =>
+	check.then(
+		() => true,
+		() => false,
+	);
+
+/** The project editor's media items: each is a link whose text is "Edit media, <title>". */
+function mediaItems(dialog: Locator) {
+	const items = dialog.locator("a").filter({ hasText: /^\s*Edit media, /u });
+	const titles = () =>
+		items.evaluateAll((as) =>
+			as.map((a) => ({
+				text: (a.textContent ?? "").replace(/\s+/gu, " ").trim(),
+				src: a.querySelector("img")?.getAttribute("src") ?? null,
+			})),
+		);
+	return { items, titles };
+}
+
+/** Which of the editor's items is the target: its place among those with its title, checked by thumbnail where titles collide. */
+async function findMedia(
+	project: Locator,
+	target: MediaTarget,
+): Promise<{ at: number; thumb: string } | string> {
+	const { items, titles } = mediaItems(project);
+	await items
+		.first()
+		.waitFor({ state: "attached", timeout: 8000 })
+		.catch(() => undefined);
+	const listed = await titles();
+	const want = `${MEDIA_PREFIX}${target.title}`;
+	const same = listed.flatMap((x, i) => (x.text === want ? [i] : []));
+	if (same.length !== target.of)
+		return `the editor shows ${same.length} media items titled ${JSON.stringify(target.title)}, the mirror ${target.of} (of ${listed.length} items); re-export`;
+	const at = same[target.nth];
+	if (at === undefined) return "no such media item";
+	const thumb = thumbKind(listed[at]?.src);
+	// One item of that title: the title is the proof. Several: the thumbnail must agree too.
+	const expected = target.kind === "LINK" ? "LINK" : "upload";
+	if (target.of > 1 && thumb !== expected)
+		return `item ${target.nth + 1} of ${target.of} titled ${JSON.stringify(target.title)} has a ${thumb} thumbnail, not a ${target.kind}'s`;
+	return { at, thumb };
+}
+
+/** How a dry run names the item it would delete. */
+function describeMedia(t: MediaTarget, thumb: string): string {
+	const base = `${t.kind} ${JSON.stringify(t.title)}`;
+	if (t.of < 2) return base;
+	const desc = t.description
+		? `, description ${JSON.stringify(t.description)}`
+		: "";
+	return `${base} (item ${t.nth + 1} of ${t.of} with that title, ${thumb} thumbnail${desc})`;
+}
+
 /**
- * Remove one media item, by title, from the open project. Each item is a link
- * "Edit media, <title>" that opens an "Edit media" dialog with Delete. A real
- * run accepts an optional confirmation with one Delete, then the project
- * editor back without the item, and saves it; anything else is discarded.
+ * Remove one media item from the open project. Each item is a link
+ * "Edit media, <title>" that turns the dialog into an "Edit media" view with
+ * Delete. Titles are matched here, not in a selector: a quote in a title
+ * broke Playwright's text selector (it found 0 of 2 items). Where titles
+ * collide, the item is the target's place among them, checked against its
+ * thumbnail (a link preview or an upload) and its description. Delete asks
+ * "Delete this media?" in a second dialog; a real run confirms it, waits for
+ * the project view to come back one item shorter, and saves it. Anything else
+ * is discarded.
  */
 export async function runRemoveMedia(
 	page: Page,
 	title: string,
-	media: string,
+	target: MediaTarget,
 	dryRun: boolean,
 ): Promise<string> {
-	await assertProjectQuiet(page, await projectEditor(page, title));
-	const item = page
-		.getByRole("dialog")
-		.locator("a")
-		.filter({
-			hasText: new RegExp(`^\\s*Edit media, ${escapeRe(media)}\\s*$`, "u"),
-		});
-	await item
-		.first()
-		.waitFor({ state: "attached", timeout: 8000 })
-		.catch(() => undefined);
-	if ((await item.count()) !== 1) {
+	const project = await projectEditor(page, title);
+	await assertProjectQuiet(page, project);
+	const fail = async (says: string): Promise<never> => {
 		await discardAll(page);
-		throw new Refused(
-			`${await item.count()} media items titled ${JSON.stringify(media)} on this project (expected one)`,
-		);
-	}
-	await item.click();
-	const mediaDialog = page
+		throw new Refused(`${says}; discarded`);
+	};
+	const found = await findMedia(project, target);
+	if (typeof found === "string") return fail(found);
+	await mediaItems(project).items.nth(found.at).click();
+	const view = page
 		.getByRole("dialog")
 		.filter({ has: page.getByRole("heading", { name: /^Edit media$/u }) });
-	const del = mediaDialog
+	if (!(await passes(view.waitFor({ timeout: TIMEOUTS.open }))))
+		return fail("no Edit media view opened");
+	const holds = (label: RegExp, value: string) =>
+		passes(
+			expect(view.getByRole("textbox", { name: label }).first()).toHaveValue(
+				value,
+				{ timeout: TIMEOUTS.control },
+			),
+		);
+	if (!(await holds(/^Title\*?$/u, target.title)))
+		return fail(`the media editor is not for ${JSON.stringify(target.title)}`);
+	if (
+		target.of > 1 &&
+		!(await holds(/^Description$/u, target.description ?? ""))
+	)
+		return fail(
+			`the media editor's description is not ${JSON.stringify(target.description ?? "")}: the wrong item`,
+		);
+	const del = view
 		.getByRole("button", { name: /^delete$/iu })
 		.filter({ visible: true });
-	await expect(
-		mediaDialog.locator("input:not([type=hidden]), textarea").first(),
-	)
-		.toHaveValue(media, { timeout: 3000 })
-		.catch(async () => {
-			await discardAll(page);
-			throw new Refused(
-				`the media editor is not for ${JSON.stringify(media)}; discarded`,
-			);
-		});
-	if ((await del.count()) !== 1 || dryRun) {
-		const n = await del.count();
+	const n = await del.count();
+	if (n !== 1)
+		return fail(`the media editor shows ${n} Delete buttons (expected one)`);
+	if (dryRun) {
 		await discardAll(page);
-		if (n !== 1)
-			throw new Refused(
-				`the media editor shows ${n} Delete buttons (expected one); discarded`,
-			);
-		return "would delete the media item; discarded";
+		return `would delete ${describeMedia(target, found.thumb)}; discarded`;
 	}
 	await del.click();
-	// Either a confirmation with its own Delete, or straight back to the project.
+	await confirmMediaDelete(page, view, fail);
+	const left = () =>
+		mediaItems(project)
+			.titles()
+			.then(
+				(xs) =>
+					xs.filter((x) => x.text === `${MEDIA_PREFIX}${target.title}`).length,
+			);
+	if (
+		!(await until(async () => (await left()) === target.of - 1, TIMEOUTS.close))
+	)
+		return fail(
+			"the item is still on the project after Delete. Delete may have saved it: re-export before retrying",
+		);
+	return save(page, project);
+}
+
+/**
+ * After Delete: LinkedIn asks "Delete this media?" in a second, native
+ * <dialog> (no role attribute: the old [role=dialog] match missed it, took the
+ * Edit media view's Save for the project's, and timed out on a Save the
+ * confirmation covered). The confirmation is the dialog with a Delete and no
+ * text box, which the Edit media view and the project both have. Confirm it,
+ * then wait for the project view to be back with nothing on top.
+ */
+async function confirmMediaDelete(
+	page: Page,
+	view: Locator,
+	fail: (says: string) => Promise<never>,
+): Promise<void> {
 	const confirm = page
-		.locator('[role="dialog"], [role="alertdialog"]')
-		.filter({ hasNot: page.getByRole("heading", { name: /^Edit media$/u }) })
+		.getByRole("dialog")
+		.or(page.getByRole("alertdialog"))
+		.filter({ hasNot: page.getByRole("textbox") })
 		.getByRole("button", { name: /^delete$/iu })
 		.filter({ visible: true });
-	await confirm
-		.or(
-			page
-				.getByRole("dialog")
-				.first()
-				.getByRole("button", { name: "Save", exact: true }),
-		)
-		.first()
-		.waitFor({ timeout: 10_000 });
-	if ((await confirm.count()) === 1) await confirm.click();
-	await expect(item)
-		.toHaveCount(0, { timeout: 10_000 })
-		.catch(async () => {
-			await discardAll(page);
-			throw new Refused(
-				"the item is still on the project after Delete; discarded unsaved. Delete may have saved it: re-export before retrying",
-			);
-		});
-	return save(page, page.getByRole("dialog").first());
+	const back = page
+		.getByRole("dialog")
+		.filter({ has: page.getByLabel(/^Project name\*?$/iu) });
+	if (
+		!(await passes(
+			confirm.or(back).first().waitFor({ timeout: TIMEOUTS.close }),
+		))
+	)
+		await fail("after Delete, neither a confirmation nor the project came up");
+	const asks = await confirm.count();
+	if (asks > 1) await fail(`the confirmation shows ${asks} Delete buttons`);
+	if (asks === 1) await confirm.click();
+	const alone = async () =>
+		(await back.isVisible()) &&
+		(await view.count()) === 0 &&
+		(await confirm.count()) === 0;
+	if (!(await until(alone, TIMEOUTS.close)))
+		await fail(
+			"the project editor did not come back alone after Delete. Delete may have saved it: re-export before retrying",
+		);
 }

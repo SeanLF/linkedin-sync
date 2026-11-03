@@ -41,8 +41,8 @@ const USAGE = `usage:
   linkedin-sync write [--dry-run | --noop | --probe] [--json] [--trace] [--no-verify]
                       [--max-age-days N] [--allow-mass-remove] (<block>... | --all-drift)
   linkedin-sync write [--dry-run] --delete <${DELETE_TYPES.join("|")}> <title, name or match> [role=...]
-  linkedin-sync write [--dry-run] --add-link <project-block>
-  linkedin-sync write [--dry-run] --remove-media <project-block> <media title>
+  linkedin-sync write [--dry-run] --add-link <project-block> [--move-legacy-url]
+  linkedin-sync write [--dry-run] --remove-media <project-block> <media title> [--kind LINK|IMAGE|...]
   linkedin-sync mcp`;
 
 const Days = z.coerce.number().positive();
@@ -127,6 +127,8 @@ const WRITE_FLAGS = {
 	delete: { type: "string" },
 	"add-link": { type: "string" },
 	"remove-media": { type: "string" },
+	kind: { type: "string" },
+	"move-legacy-url": { type: "boolean" },
 } as const;
 type WriteFlags = ReturnType<
 	typeof parseArgs<{ options: typeof WRITE_FLAGS }>
@@ -171,6 +173,10 @@ function writeCommand(args: string[]): Promise<number> {
 		options: WRITE_FLAGS,
 	});
 	const o = writeOptions(values);
+	if (values.kind !== undefined && values["remove-media"] === undefined)
+		throw new Refused("--kind only applies to --remove-media");
+	if (values["move-legacy-url"] && values["add-link"] === undefined)
+		throw new Refused("--move-legacy-url only applies to --add-link");
 	if (values.delete !== undefined) {
 		const type = z.enum(DELETE_TYPES).safeParse(values.delete);
 		if (!(type.success && positionals.length))
@@ -180,14 +186,25 @@ function writeCommand(args: string[]): Promise<number> {
 		return deleteEntry(type.data, positionals, o);
 	}
 	if (values["add-link"] !== undefined)
-		return projectMedia(values["add-link"], { add: true }, o);
+		return projectMedia(
+			values["add-link"],
+			{ add: true, moveLegacy: values["move-legacy-url"] ?? false },
+			o,
+		);
 	if (values["remove-media"] !== undefined) {
 		const [media, ...extra] = positionals;
 		if (!media || extra.length)
 			throw new Refused(
 				"--remove-media takes <project-block> and one media title",
 			);
-		return projectMedia(values["remove-media"], { remove: media }, o);
+		return projectMedia(
+			values["remove-media"],
+			{
+				remove: media,
+				...(values.kind === undefined ? {} : { kind: values.kind }),
+			},
+			o,
+		);
 	}
 	return writeBlocks(positionals, values["all-drift"] ?? false, o);
 }
