@@ -5,7 +5,7 @@ import { expect, test as it } from "@playwright/test";
 import { dateLabel, parseDate, parseRange, rangeLabel } from "../src/dates.ts";
 import { compared, compareField, exitCode, staleFields } from "../src/drift.ts";
 import { Refused } from "../src/editor.ts";
-import { mergeRecent, parseCsv } from "../src/export.ts";
+import { mergeRecent, parseCsv, readExperience } from "../src/export.ts";
 import { escapeRe, fieldFor, planSkills } from "../src/fields.ts";
 import { bootstrapText } from "../src/init.ts";
 import type { Mirror } from "../src/mirror.ts";
@@ -462,4 +462,56 @@ it("--recent puts new connections on top and leaves existing rows alone", () => 
 		...file.slice(1),
 	]);
 	expect(mergeRecent(merged, read)).toEqual(merged);
+// 2026-11-11: LinkedIn left the Hivebrite group's own list out of one response, so its three
+// roles read absent and drift matched another company's role text. A group the main list
+// links must come back with its roles, or the read fails; a retry that brings it back is fine.
+it.describe("readExperience", () => {
+	const P = "ACoAAtest";
+	const groupUrn = (h: string) =>
+		`urn:li:fsd_profilePagedListComponent:(${P},EXPERIENCE_VIEW_DETAILS,urn:li:fsd_profilePositionGroup:(${P},${h}),NONE,en_US)`;
+	const el = (title: string, extra: Record<string, unknown> = {}) => ({
+		components: {
+			entityComponent: { titleV2: { text: { text: title } }, ...extra },
+		},
+	});
+	const plc = (deco: string, urn: string, els: unknown[]) => {
+		const components = { elements: els, paging: { total: els.length } };
+		return {
+			decorationType: deco,
+			entityUrn: urn,
+			components,
+			raw: { components },
+		};
+	};
+	const main = plc(
+		"LINE_SEPARATED",
+		`urn:li:fsd_profilePagedListComponent:(${P},EXPERIENCE_VIEW_DETAILS,urn:li:fsd_profile:${P},NONE,en_US)`,
+		[
+			el("Acme", { "*pagedListComponent": groupUrn("aa11") }),
+			el("Solo Corp role"),
+		],
+	);
+	const group = plc("NONE", groupUrn("aa11"), [el("Senior"), el("Junior")]);
+	const run = (responses: unknown[][]) => {
+		let i = 0;
+		// biome-ignore lint/suspicious/noExplicitAny: test double for the Plcs reader
+		return readExperience(
+			(async () => responses[Math.min(i++, responses.length - 1)]) as any,
+			[],
+		);
+	};
+
+	it("attaches a group's roles to its company", async () => {
+		const out = await run([[main, group]]);
+		expect(out[0]?.roles?.map((r) => r.title)).toEqual(["Senior", "Junior"]);
+	});
+	it("retries once when a linked group's roles are missing", async () => {
+		const out = await run([[main], [main, group]]);
+		expect(out[0]?.roles?.map((r) => r.title)).toEqual(["Senior", "Junior"]);
+	});
+	it("fails rather than read a company with no roles", async () => {
+		await expect(run([[main], [main]])).rejects.toThrow(
+			/listed without its roles/u,
+		);
+	});
 });

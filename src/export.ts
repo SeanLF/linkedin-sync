@@ -472,8 +472,11 @@ const Elements = z.object({
 });
 
 /** Experience: one list, plus one more per company that holds several roles, matched by position group id. */
-async function readExperience(plcs: Plcs, warnings: string[]): Promise<Item[]> {
-	const all = await plcs("experience");
+export async function readExperience(
+	plcs: Plcs,
+	warnings: string[],
+): Promise<Item[]> {
+	let all = await plcs("experience");
 	const main = all.find((p) => p.decorationType === "LINE_SEPARATED");
 	if (!main) throw new Error("no experience list in the response");
 	const entries = parseElements(main.components?.elements ?? []);
@@ -481,14 +484,34 @@ async function readExperience(plcs: Plcs, warnings: string[]): Promise<Item[]> {
 	const raw = Elements.parse(main.raw).components.elements.map((el) =>
 		JSON.stringify(el),
 	);
-	const groups = all.filter(
-		(p) =>
-			p.decorationType === "NONE" &&
-			p.entityUrn?.includes("profilePositionGroup"),
+	const groupOf = (urn: string | null | undefined) =>
+		/fsd_profilePositionGroup:([^)]+)/u.exec(urn ?? "")?.[1] ?? "";
+	const isGroup = (p: (typeof all)[number]) =>
+		p.decorationType === "NONE" &&
+		Boolean(p.entityUrn?.includes("profilePositionGroup"));
+	// An entry that links a position group's own list holds several roles. LinkedIn
+	// sometimes leaves a group's list out of the response (seen 2026-11-11: the
+	// Hivebrite group came back without its three roles), and an entry without
+	// them reads as a company with no roles: every role there would read absent
+	// and the role matcher could fall through to another company's text.
+	const expected = raw.flatMap(
+		(el) =>
+			/fsd_profilePagedListComponent:\([^()]*fsd_profilePositionGroup:(\([^)]+)\)/u.exec(
+				el,
+			)?.[1] ?? [],
 	);
-	for (const plc of groups) {
-		const group =
-			/fsd_profilePositionGroup:([^)]+)/u.exec(plc.entityUrn ?? "")?.[1] ?? "";
+	const missing = () => {
+		const got = new Set(all.filter(isGroup).map((p) => groupOf(p.entityUrn)));
+		return expected.filter((g) => !got.has(g));
+	};
+	if (missing().length) all = await plcs("experience"); // once: it has come back whole on a retry
+	const short = missing();
+	if (short.length)
+		throw new Error(
+			`position group ${short.join(", ")} listed without its roles, twice; re-export`,
+		);
+	for (const plc of all.filter(isGroup)) {
+		const group = groupOf(plc.entityUrn);
 		const entry = entries[raw.findIndex((el) => group && el.includes(group))];
 		if (!entry) {
 			// Noted, not fatal: a role it held reads absent, and positions are never created.
