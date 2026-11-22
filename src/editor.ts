@@ -20,6 +20,8 @@ export const TIMEOUTS = {
 	settle: 2500,
 	close: 20_000,
 	confirm: 6000,
+	/** How long after the editor closes LinkedIn may still mount its "saved" prompt. */
+	latePrompt: 2000,
 };
 
 /** A refusal: nothing was saved. */
@@ -282,6 +284,14 @@ async function save(
 		]);
 		if (prompted)
 			return `saved; ${await skipSavedPrompt(prompt)}; ${quiet.says}`;
+		// LinkedIn can mount the prompt a beat after the editor goes: catch it, or the next field opens onto it
+		const late = await prompt
+			.waitFor({ state: "visible", timeout: TIMEOUTS.latePrompt })
+			.then(
+				() => true,
+				() => false,
+			);
+		if (late) return `saved; ${await skipSavedPrompt(prompt)}; ${quiet.says}`;
 		return `saved; dialog closed; ${quiet.says}`;
 	} catch (err) {
 		if (page.isClosed())

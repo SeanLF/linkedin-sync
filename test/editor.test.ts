@@ -25,6 +25,8 @@ interface Shape {
 	confirm?: boolean;
 	/** After Save, LinkedIn's "Your experience is saved" dialog, as captured from a live save. */
 	prompt?: boolean;
+	/** Mount the prompt this many ms after the editor goes, as LinkedIn can. */
+	promptDelayMs?: number;
 }
 
 // Captured from a Playwright trace of a live position save (2026-11-21): hashed
@@ -76,12 +78,14 @@ function dialog(page: Page, shape: Shape = {}) {
 		ed.remove();
 		const shown = document.getElementById("prompt").content.firstElementChild;
 		if (!shown) return;
-		document.body.append(shown);
-		shown.showModal();
-		for (const b of shown.querySelectorAll("button"))
-			b.onclick = /^Invite /.test(b.getAttribute("aria-label") ?? "")
-				? () => { window.invited = true; }
-				: () => shown.close();
+		setTimeout(() => {
+			document.body.append(shown);
+			shown.showModal();
+			for (const b of shown.querySelectorAll("button"))
+				b.onclick = /^Invite /.test(b.getAttribute("aria-label") ?? "")
+					? () => { window.invited = true; }
+					: () => shown.close();
+		}, ${shape.promptDelayMs ?? 0});
 	};
 	document.getElementById("dismiss").onclick = () => {
 		const p = document.createElement("div");
@@ -166,6 +170,21 @@ it('a save LinkedIn answers with its "experience is saved" dialog is a save: ski
 	expect(out.ok).toBe(true);
 	expect(out.outcome).toMatch(/^saved; LinkedIn's "saved" prompt skipped;/u);
 	expect(await saved(page)).toMatchObject({ company: "Globex" });
+	expect(
+		await page.evaluate(
+			() => (globalThis as unknown as { invited: boolean }).invited,
+		),
+	).toBe(false);
+	await expect(page.getByRole("dialog")).toHaveCount(0);
+});
+
+it("a saved prompt that mounts after the editor has closed is still skipped", async ({
+	page,
+}) => {
+	await dialog(page, { prompt: true, promptDelayMs: 500 });
+	const out = await runEditor(page, role(), "save");
+	expect(out.ok).toBe(true);
+	expect(out.outcome).toMatch(/^saved; LinkedIn's "saved" prompt skipped;/u);
 	expect(
 		await page.evaluate(
 			() => (globalThis as unknown as { invited: boolean }).invited,
