@@ -233,6 +233,34 @@ async function refuse(
 	throw new Refused(`${says}${closed}`);
 }
 
+/**
+ * The dialog LinkedIn opens once an edit is saved: "Your experience is saved",
+ * then "Next, connect with people you may know from <company>" (2026-11). It
+ * takes the editor's place as the page's first dialog, so it says the save
+ * went through, not that validation kept the editor open.
+ */
+const savedPrompt = (page: Page) =>
+	page
+		.getByRole("dialog")
+		.filter({ has: page.getByText(/^Your [\w ]+ is saved$/u) })
+		.first();
+
+/** Close the saved prompt by its Skip (or Dismiss) control; never a Connect button. */
+async function skipSavedPrompt(prompt: Locator): Promise<string> {
+	const skipped = await prompt
+		.getByRole("button", { name: /^(Skip|Dismiss)$/u })
+		.first()
+		.click({ timeout: TIMEOUTS.control })
+		.then(() => prompt.waitFor({ state: "hidden", timeout: TIMEOUTS.close }))
+		.then(
+			() => true,
+			() => false,
+		);
+	return skipped
+		? `LinkedIn's "saved" prompt skipped`
+		: `LinkedIn's "saved" prompt left open`;
+}
+
 /** Click Save and wait for the editor to close. Under headless the page can close on Save while the write lands; the export decides. */
 async function save(
 	page: Page,
@@ -242,8 +270,18 @@ async function save(
 	// Every Save goes through here, and none with the share switch on.
 	const quiet = await assertQuiet(page, dialog, notify);
 	await dialog.getByRole("button", { name: "Save", exact: true }).click();
+	const prompt = savedPrompt(page);
 	try {
-		await dialog.waitFor({ state: "hidden", timeout: TIMEOUTS.close });
+		const prompted = await Promise.race([
+			dialog
+				.waitFor({ state: "hidden", timeout: TIMEOUTS.close })
+				.then(() => false),
+			prompt
+				.waitFor({ state: "visible", timeout: TIMEOUTS.close })
+				.then(() => true),
+		]);
+		if (prompted)
+			return `saved; ${await skipSavedPrompt(prompt)}; ${quiet.says}`;
 		return `saved; dialog closed; ${quiet.says}`;
 	} catch (err) {
 		if (page.isClosed())

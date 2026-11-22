@@ -3,6 +3,7 @@
 // "currently" box that reveals the end date a beat later, the share switch
 // rendered twice, a Discard prompt, a separate delete confirmation).
 
+import { readFileSync } from "node:fs";
 import { expect, test as it, type Page } from "@playwright/test";
 import {
 	Refused,
@@ -22,9 +23,19 @@ interface Shape {
 	shouting?: boolean;
 	invalid?: boolean;
 	confirm?: boolean;
+	/** After Save, LinkedIn's "Your experience is saved" dialog, as captured from a live save. */
+	prompt?: boolean;
 }
 
-/** One edit dialog; window.saved holds what Save submitted, window.deleted whether the entry went. */
+// Captured from a Playwright trace of a live position save (2026-11-21): hashed
+// classes, icons and images stripped, the suggested people replaced by made-up
+// ones; LinkedIn's structure, roles, labels and text are as served.
+const savedPrompt = readFileSync(
+	new URL("fixtures/post-save-connect-dialog.html", import.meta.url),
+	"utf8",
+);
+
+/** One edit dialog; window.saved holds what Save submitted, window.deleted whether the entry went, window.invited whether a Connect was pressed. */
 function dialog(page: Page, shape: Shape = {}) {
 	const {
 		heading = "Edit role",
@@ -47,8 +58,9 @@ function dialog(page: Page, shape: Shape = {}) {
 	<div contenteditable="true" id="d">Old text.</div>
 	<button id="del">Delete role</button><button id="save">Save</button>
 </div>
+<template id="prompt">${shape.prompt ? savedPrompt : ""}</template>
 <script>
-	window.saved = null; window.deleted = false;
+	window.saved = null; window.deleted = false; window.invited = false;
 	const ed = document.getElementById("ed");
 	const end = document.getElementById("end");
 	// Unticking "currently" renders the end selects 300ms later.
@@ -62,6 +74,14 @@ function dialog(page: Page, shape: Shape = {}) {
 		if (${Boolean(shape.invalid)}) return;
 		window.saved = { title: t.value, company: c.value, current: cur.checked, description: d.innerText };
 		ed.remove();
+		const shown = document.getElementById("prompt").content.firstElementChild;
+		if (!shown) return;
+		document.body.append(shown);
+		shown.showModal();
+		for (const b of shown.querySelectorAll("button"))
+			b.onclick = /^Invite /.test(b.getAttribute("aria-label") ?? "")
+				? () => { window.invited = true; }
+				: () => shown.close();
 	};
 	document.getElementById("dismiss").onclick = () => {
 		const p = document.createElement("div");
@@ -136,6 +156,22 @@ it("fills, waits for the end date the box reveals, reads back, saves", async ({
 		current: false,
 		description: "New text.",
 	});
+});
+
+it('a save LinkedIn answers with its "experience is saved" dialog is a save: skipped, no Connect pressed', async ({
+	page,
+}) => {
+	await dialog(page, { prompt: true });
+	const out = await runEditor(page, role(), "save");
+	expect(out.ok).toBe(true);
+	expect(out.outcome).toMatch(/^saved; LinkedIn's "saved" prompt skipped;/u);
+	expect(await saved(page)).toMatchObject({ company: "Globex" });
+	expect(
+		await page.evaluate(
+			() => (globalThis as unknown as { invited: boolean }).invited,
+		),
+	).toBe(false);
+	await expect(page.getByRole("dialog")).toHaveCount(0);
 });
 
 it("a dry run fills, answers the Discard prompt, and saves nothing", async ({
