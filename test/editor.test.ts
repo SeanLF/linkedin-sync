@@ -27,6 +27,8 @@ interface Shape {
 	prompt?: boolean;
 	/** Mount the prompt this many ms after the editor goes, as LinkedIn can. */
 	promptDelayMs?: number;
+	/** LinkedIn's docked Messaging conversation, a role=dialog of its own that stays open after the editor goes. */
+	messaging?: boolean;
 }
 
 // Captured from a Playwright trace of a live position save (2026-11-21): hashed
@@ -34,6 +36,15 @@ interface Shape {
 // ones; LinkedIn's structure, roles, labels and text are as served.
 const savedPrompt = readFileSync(
 	new URL("fixtures/post-save-connect-dialog.html", import.meta.url),
+	"utf8",
+);
+
+// Captured from the Playwright traces of eight live saves (2026-11-21) that
+// reported "left the dialog open" yet landed: the dialog still open was this
+// docked conversation, not the editor. Trimmed to one message; the people and
+// the message are made up.
+const messagingOverlay = readFileSync(
+	new URL("fixtures/messaging-overlay.html", import.meta.url),
 	"utf8",
 );
 
@@ -60,9 +71,11 @@ function dialog(page: Page, shape: Shape = {}) {
 	<div contenteditable="true" id="d">Old text.</div>
 	<button id="del">Delete role</button><button id="save">Save</button>
 </div>
+${shape.messaging ? messagingOverlay : ""}
 <template id="prompt">${shape.prompt ? savedPrompt : ""}</template>
 <script>
-	window.saved = null; window.deleted = false; window.invited = false;
+	window.saved = null; window.deleted = false; window.invited = false; window.chatted = false;
+	document.querySelector('[aria-label="Messaging"]')?.addEventListener("click", () => { window.chatted = true; });
 	const ed = document.getElementById("ed");
 	const end = document.getElementById("end");
 	// Unticking "currently" renders the end selects 300ms later.
@@ -193,6 +206,25 @@ it("a saved prompt that mounts after the editor has closed is still skipped", as
 	await expect(page.getByRole("dialog")).toHaveCount(0);
 });
 
+it("a save that leaves LinkedIn's Messaging conversation open is a save: the conversation untouched", async ({
+	page,
+}) => {
+	await dialog(page, { messaging: true });
+	const out = await runEditor(page, role(), "save");
+	expect(out.ok).toBe(true);
+	expect(out.outcome).toMatch(/^saved; dialog closed;/u);
+	expect(await saved(page)).toMatchObject({ company: "Globex" });
+	expect(
+		await page.evaluate(
+			() => (globalThis as unknown as { chatted: boolean }).chatted,
+		),
+	).toBe(false);
+	await expect(page.getByRole("heading", { name: /^Edit role$/u })).toHaveCount(
+		0,
+	);
+	await expect(page.getByRole("dialog", { name: "Messaging" })).toBeVisible();
+});
+
 it("a dry run fills, answers the Discard prompt, and saves nothing", async ({
 	page,
 }) => {
@@ -254,6 +286,12 @@ for (const [why, shape, over, message] of [
 		{ invalid: true },
 		{},
 		/left the dialog open/u,
+	],
+	[
+		"a Save that validation keeps open, with the Messaging conversation open too",
+		{ invalid: true, messaging: true },
+		{},
+		/left the dialog open \(LinkedIn's validation keeps it up\): Edit role/u,
 	],
 ] as [string, Shape, Partial<Editor>, RegExp][])
 	it(`refuses ${why}`, async ({ page }) => {

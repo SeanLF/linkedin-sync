@@ -263,14 +263,40 @@ async function skipSavedPrompt(prompt: Locator): Promise<string> {
 		: `LinkedIn's "saved" prompt left open`;
 }
 
+/**
+ * The editor itself, pinned by its heading. "The page's first dialog" stops
+ * meaning the editor once it closes: LinkedIn's docked Messaging conversation
+ * is a dialog too and stays open, so waiting for "first dialog hidden" timed
+ * out on eight saves that had landed (2026-11-21).
+ */
+async function pinEditor(page: Page, dialog: Locator): Promise<Locator> {
+	const heading = (
+		await dialog
+			.getByRole("heading")
+			.first()
+			.textContent({ timeout: TIMEOUTS.control })
+			.catch(() => null)
+	)?.trim();
+	if (!heading) return dialog;
+	return page
+		.getByRole("dialog")
+		.filter({
+			has: page.getByRole("heading").filter({
+				hasText: new RegExp(`^\\s*${escapeRe(heading)}\\s*$`, "u"),
+			}),
+		})
+		.first();
+}
+
 /** Click Save and wait for the editor to close. Under headless the page can close on Save while the write lands; the export decides. */
 async function save(
 	page: Page,
-	dialog: Locator,
+	opened: Locator,
 	notify: Notify = "if-present",
 ): Promise<string> {
 	// Every Save goes through here, and none with the share switch on.
-	const quiet = await assertQuiet(page, dialog, notify);
+	const quiet = await assertQuiet(page, opened, notify);
+	const dialog = await pinEditor(page, opened);
 	await dialog.getByRole("button", { name: "Save", exact: true }).click();
 	const prompt = savedPrompt(page);
 	try {
