@@ -462,6 +462,8 @@ it("--recent puts new connections on top and leaves existing rows alone", () => 
 		...file.slice(1),
 	]);
 	expect(mergeRecent(merged, read)).toEqual(merged);
+});
+
 // 2026-11-11: LinkedIn left the Hivebrite group's own list out of one response, so its three
 // roles read absent and drift matched another company's role text. A group the main list
 // links must come back with its roles, or the read fails; a retry that brings it back is fine.
