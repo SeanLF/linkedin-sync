@@ -15,7 +15,13 @@ import { z } from "zod";
 import { connect } from "./browser.ts";
 import { runDrift } from "./drift.ts";
 import { Refused } from "./editor.ts";
-import { exportConnections, exportProfile, writeCsv } from "./export.ts";
+import {
+	exportConnections,
+	exportProfile,
+	mergeRecent,
+	parseCsv,
+	writeCsv,
+} from "./export.ts";
 import { bootstrap } from "./init.ts";
 import { serve } from "./mcp.ts";
 import { MAX_AGE_DAYS, writeMirror } from "./mirror.ts";
@@ -30,7 +36,7 @@ import {
 
 const USAGE = `usage:
   linkedin-sync init
-  linkedin-sync export [--connections [--force]]
+  linkedin-sync export [--connections [--force | --recent]]
   linkedin-sync drift [--max-age-days N] [--check-links] [--json]
   linkedin-sync write [--dry-run | --noop | --probe] [--json] [--trace] [--no-verify]
                       [--max-age-days N] [--allow-mass-remove] (<block>... | --all-drift)
@@ -45,7 +51,11 @@ async function exportCommand(args: string[]): Promise<number> {
 	const { values } = parseArgs({
 		args,
 		strict: true,
-		options: { connections: { type: "boolean" }, force: { type: "boolean" } },
+		options: {
+			connections: { type: "boolean" },
+			force: { type: "boolean" },
+			recent: { type: "boolean" },
+		},
 	});
 	const s = await connect();
 	try {
@@ -53,8 +63,19 @@ async function exportCommand(args: string[]): Promise<number> {
 			writeMirror(await exportProfile(s));
 			return 0;
 		}
-		const rows = await exportConnections(s.api);
 		const path = fileURLToPath(new URL("../connections.csv", import.meta.url));
+		if (values.recent) {
+			// Only the newest page, merged in: the rest of the file stays as it is.
+			const read = await exportConnections(s.api, console.error, 1);
+			if (read.length <= 1)
+				throw new Refused("no connections read; not changing the file");
+			const old = existsSync(path) ? parseCsv(readFileSync(path, "utf8")) : [];
+			const merged = mergeRecent(old, read);
+			writeCsv(path, merged);
+			console.error(`${merged.length - old.length} new connections -> ${path}`);
+			return 0;
+		}
+		const rows = await exportConnections(s.api);
 		const before = existsSync(path)
 			? readFileSync(path, "utf8").trim().split("\n").length
 			: 0;

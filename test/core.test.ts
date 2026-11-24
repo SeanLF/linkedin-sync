@@ -5,6 +5,7 @@ import { expect, test as it } from "@playwright/test";
 import { dateLabel, parseDate, parseRange, rangeLabel } from "../src/dates.ts";
 import { compared, compareField, exitCode, staleFields } from "../src/drift.ts";
 import { Refused } from "../src/editor.ts";
+import { mergeRecent, parseCsv } from "../src/export.ts";
 import { fieldFor, planSkills } from "../src/fields.ts";
 import { bootstrapText } from "../src/init.ts";
 import type { Mirror } from "../src/mirror.ts";
@@ -321,4 +322,31 @@ it("init writes a record that matches the profile it came from", () => {
 	);
 	expect(results.length).toBeGreaterThan(8);
 	expect(results.filter((r) => r.verdict !== "match")).toEqual([]);
+});
+
+it("--recent puts new connections on top and leaves existing rows alone", () => {
+	const head = ["name", "headline", "url", "connected_on"];
+	const row = (n: string, d: string) => [
+		n,
+		'says "hi", ok',
+		`https://www.linkedin.com/in/${n}/`,
+		d,
+	];
+	const file = [head, row("b", "2026-11-01"), ["'=x", "", "u-old", ""]];
+	const text = `${file.map((r) => r.map((c) => `"${c.replaceAll('"', '""')}"`).join(",")).join("\n")}\n`;
+	expect(parseCsv(text)).toEqual(file);
+	const read = [
+		head,
+		row("d", "2026-11-20"),
+		row("c", "2026-11-10"),
+		row("b", "2026-11-01"),
+	];
+	const merged = mergeRecent(parseCsv(text), read);
+	expect(merged).toEqual([
+		head,
+		row("d", "2026-11-20"),
+		row("c", "2026-11-10"),
+		...file.slice(1),
+	]);
+	expect(mergeRecent(merged, read)).toEqual(merged);
 });

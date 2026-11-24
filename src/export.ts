@@ -669,15 +669,16 @@ const Person = z.object({
 });
 const Conn = z.object({ createdAt: n(z.number()) });
 
-/** Every first-degree connection, newest first, as CSV rows. */
+/** First-degree connections, newest first, as CSV rows; `pages` caps the pages read (1 = the newest 40). */
 export async function exportConnections(
 	api: Voyager,
 	log = console.error,
+	pages = Number.POSITIVE_INFINITY,
 ): Promise<string[][]> {
 	const Size = 40; // what the UI asks for; larger is refused
 	const rows: string[][] = [["name", "headline", "url", "connected_on"]];
 	const seen = new Set<string>();
-	for (let start = 0; ; start += Size) {
+	for (let start = 0; start < Size * pages; start += Size) {
 		const page = await api(
 			`/voyager/api/relationships/dash/connections?decorationId=com.linkedin.voyager.dash.deco.web.mynetwork.ConnectionListWithProfile-16&count=${Size}&q=search&sortType=RECENTLY_ADDED&start=${start}`,
 			Connections,
@@ -703,6 +704,7 @@ export async function exportConnections(
 		if (page.data["*elements"].length < Size) return rows;
 		await new Promise((r) => setTimeout(r, 800)); // roughly the UI's scroll cadence
 	}
+	return rows;
 }
 
 // Names and headlines are other people's text, opened in a spreadsheet: a
@@ -711,3 +713,49 @@ const cell = (v: string) =>
 	`"${v.replace(/^[=+\-@\t\r]/u, "'$&").replaceAll('"', '""')}"`;
 export const writeCsv = (path: string, rows: string[][]): void =>
 	writeFileSync(path, `${rows.map((r) => r.map(cell).join(",")).join("\n")}\n`);
+
+/** Parse CSV text as writeCsv writes it: quoted cells, "" for a quote. */
+export function parseCsv(text: string): string[][] {
+	const rows: string[][] = [];
+	let cells: string[] = [];
+	let field = "";
+	let quoted = false;
+	for (let i = 0; i < text.length; i++) {
+		const c = text[i];
+		if (quoted) {
+			if (c !== '"') field += c;
+			else if (text[i + 1] === '"') {
+				field += '"';
+				i++;
+			} else quoted = false;
+		} else if (c === '"') quoted = true;
+		else if (c === ",") {
+			cells.push(field);
+			field = "";
+		} else if (c === "\n") {
+			cells.push(field);
+			rows.push(cells);
+			cells = [];
+			field = "";
+		} else field += c;
+	}
+	if (field || cells.length) rows.push([...cells, field]);
+	return rows;
+}
+
+/**
+ * The newest page merged into the file's rows: URLs the file lacks go in
+ * under the header in the order read; every existing row stays as it is.
+ */
+export function mergeRecent(
+	existing: string[][],
+	recent: string[][],
+): string[][] {
+	const header = existing[0] ?? recent[0] ?? [];
+	const kept = existing.slice(1);
+	const known = new Set(kept.map((r) => r[2]));
+	const fresh = recent
+		.slice(1)
+		.filter((r) => r[2] && !known.has(r[2]) && known.add(r[2]));
+	return [header, ...fresh, ...kept];
+}
