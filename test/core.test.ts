@@ -496,9 +496,11 @@ it.describe("readExperience", () => {
 	const group = plc("NONE", groupUrn("aa11"), [el("Senior"), el("Junior")]);
 	const run = (responses: unknown[][]) => {
 		let i = 0;
-		// biome-ignore lint/suspicious/noExplicitAny: test double for the Plcs reader
+		// a test double for the Plcs reader: each call returns the next response
 		const plcs = (async () =>
-			responses[Math.min(i++, responses.length - 1)]) as any;
+			responses[Math.min(i++, responses.length - 1)]) as unknown as Parameters<
+			typeof readExperience
+		>[0];
 		return readExperience(plcs, []);
 	};
 
