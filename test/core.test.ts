@@ -497,10 +497,9 @@ it.describe("readExperience", () => {
 	const run = (responses: unknown[][]) => {
 		let i = 0;
 		// biome-ignore lint/suspicious/noExplicitAny: test double for the Plcs reader
-		return readExperience(
-			(async () => responses[Math.min(i++, responses.length - 1)]) as any,
-			[],
-		);
+		const plcs = (async () =>
+			responses[Math.min(i++, responses.length - 1)]) as any;
+		return readExperience(plcs, []);
 	};
 
 	it("attaches a group's roles to its company", async () => {
